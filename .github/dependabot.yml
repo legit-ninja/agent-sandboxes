@@ -21,7 +21,9 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
+      time: "05:00"
+      timezone: "America/New_York"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
@@ -30,7 +32,9 @@ updates:
     directory: "/docker"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
+      time: "05:00"
+      timezone: "America/New_York"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore"
