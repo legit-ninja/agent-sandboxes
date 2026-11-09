@@ -112,6 +112,9 @@ board_configure() {
   # than make credential exfiltration across sessions a one-flag affair.
   [[ "${tier}" -lt 3 ]] \
     || die "--board is not supported on Tier 3: a shared board would let a session holding infra credentials pass data to every other session on the board."
+  # Same reasoning for profile-declared secrets (injected as env the agent can read).
+  [[ -z "${SESSION_PROFILE_SECRETS:-}" ]] \
+    || die "--board can't be combined with a profile that injects secrets (${SESSION_PROFILE_SECRETS}): the shared board would let this session pass them to every other session on it."
 
   board="${board/#\~/${HOME}}"
   state="${state/#\~/${HOME}}"
@@ -160,9 +163,11 @@ board_configure() {
   fi
 
   if is_macos; then
-    # The definition is read straight off the 9p-shared Mac home (read-only
-    # access works there; only writes by the pod uid fail). Outside $HOME there
-    # is no mount in the VM.
+    # The definition is read straight off the 9p-shared Mac home. UNVERIFIED on a
+    # live macOS install: the known 9p problem is the pod uid's *writes* (see
+    # SANDBOX_VM_AGENT_HOME_BASE); a read-only mount is expected to work, but if
+    # it doesn't, the board fails visibly (wb can't start), never silently.
+    # Outside $HOME there is no mount in the VM.
     [[ "${board}/" == "$(_board_realpath "${HOME}")/"* ]] \
       || die "--board must live under your home directory on macOS (only \$HOME is shared into the VM)."
     SESSION_BOARD_STATE_NODE="${SANDBOX_VM_BOARD_BASE}/$(basename "${state}")"

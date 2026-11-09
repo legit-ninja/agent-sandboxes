@@ -90,6 +90,10 @@ test_configure_validation() {
   refuses "bad role syntax refused" "comma-separated" 2 "${BOARD}" "${STATE}" "Dev;rm"
   refuses "unknown persona refused" "no persona" 2 "${BOARD}" "${STATE}" "developer,wizard"
 
+  SESSION_PROFILE_SECRETS="GITHUB_TOKEN"
+  refuses "profile secrets refused" "injects secrets" 2 "${BOARD}" "${STATE}" ""
+  SESSION_PROFILE_SECRETS=""
+
   : > "${BOARD}/.env"
   refuses "board with masked secret file refused" "masks as sensitive" 2 "${BOARD}" "${STATE}" ""
   rm -f "${BOARD}/.env"

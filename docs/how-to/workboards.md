@@ -20,8 +20,8 @@ sandbox run --agent codex --tier 2 --repo ~/clones/app-codex \
 Each session starts with one message the operator wrote: *run `/workboard/bin/wb boot`*.
 That prints the agent's rules (`AGENTS.md`), its persona(s) and the work waiting
 for its roles. From then on the agent claims tasks with `wb claim` and finishes them
-with `wb done`. (Grok has no "first message" launch form yet. For Grok sessions
-the banner prints the line to paste.)
+with `wb done`. (The first message is wired for Claude, Codex, OpenCode and Copilot.
+For Grok it isn't wired yet, so the banner prints the line to paste.)
 
 ## What gets mounted
 
@@ -75,24 +75,44 @@ each other. When a task reaches `approved`, `wb export <id>` prints the
 
 The two mounts are split by trust on purpose:
 
-- **The definition is read-only.** Personas, `AGENTS.md`, the `wb` CLI and the gate
-  scripts are instructions that *every* agent on the board loads or runs. If an agent
-  could edit them, it could rewrite another agent's persona or weaken the checks
-  stage. `--board` must not overlap any `--repo`, because a writable workspace over
-  it would defeat the read-only mount. It must also not contain files the sandbox
-  masks as secrets (`.env`, ...).
+- **The definition is read-only.** Personas, `AGENTS.md` and the `wb` CLI are
+  instructions and code that *every* agent on the board loads or runs. The read-only
+  mount stops an agent from rewriting what *another* agent will run. It does not
+  make the board's verdicts trustworthy: see the state notes below. `--board` must
+  not overlap any `--repo` of the same session, and the sandbox refuses that. It
+  can't see your *other* sessions, so never also pass the workboards checkout (or a
+  parent of it) as another session's `--repo`. The definition is **not**
+  secret-scanned (only files the sandbox masks, such as `.env`, are refused), so
+  keep credentials out of it, `board.toml` included.
 - **The state is a deliberate cross-session channel.** Anything one session writes
   there, every other session on that board can read. That includes sessions running
   other vendors' models. The sandbox keeps each session's network and filesystem
   isolation, but the board is a path for data and prompt injection between sessions
   that you opt into. So:
-  - `--board` is **refused on Tier 3**. A session holding infra credentials must not
-    have a write path to other sessions.
+  - `--board` is **refused on Tier 3** and **with a profile that injects `secrets:`**.
+    A session holding those credentials must not have a write path to other sessions.
+  - What remains, by design: every agent can read **its own login**: the OAuth token
+    in its agent-home, or OpenCode's API key in its environment. On a shared board, a
+    compromised or prompt-injected agent can pass that to the other sessions, and from
+    there to another vendor's model. Only share a board between sessions whose
+    logins you are willing to expose to each other. Use separate `--board-state`
+    dirs otherwise.
   - Treat everything in the state as **untrusted, agent-written data**: task text,
     notes, verdicts and bundles. `AGENTS.md` tells agents the same. Board verdicts
     are coordination signals, not approvals. Review an approved branch yourself
     before merging. Fetching a bundle runs no hooks and imports no config, but the
     code in it is still agent-written.
+  - The board verdicts and stage order are **cooperative**. Any session can write any
+    file in the state, so it can skip the checks stage or forge a reviewer's `pass`.
+    The gate scripts being read-only stops an agent from weakening the *gate*, not
+    from going around it.
+  - `wb` never follows a symlink inside the state dir, and it ignores task files
+    whose names aren't plain ids. So planting `events.jsonl -> ~/.bashrc` or
+    `todo/x.md -> ~/.ssh/id_rsa` doesn't make *your* host-side `wb status`/`new`/`show`
+    (or another session's `wb`) write or read outside the board. Still, on the host
+    use `wb` only to manage the board (`init-project`, `new`, `status`, `show`,
+    `unblock`, `export`). `wb work` and `wb run-gate` run agent-written code. Run
+    those **only inside a sandbox**.
   - The state dir must not overlap your home directory or sensitive paths:
     `~/.ssh`, `~/.aws`, `~/.kube`, `~/.config`, `~/.sandbox/{secrets,logs,agent-home,...}`,
     or the agent-sandboxes checkout. The sandbox refuses those.
