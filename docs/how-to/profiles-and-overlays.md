@@ -22,10 +22,14 @@ extra_allowed_domains:            # optional; merged with --allow-domain
 secrets: []                       # host-side secrets to inject (see Secret store)
 mcps: []                          # MCP servers run alongside the session
 services: []                      # non-MCP service deps (DB, broker, …)
+board: ~/agent-workboards         # optional; shared workboard (see Workboards)
+board_state: ~/.sandbox/board     # optional; default ~/.sandbox/board
+role: developer,tester            # optional; board persona(s)
 ```
 
 `secrets`, `mcps`, and `services` are covered in [Secrets](secrets.md) and
-[MCP & service dependencies](mcp-and-dependencies.md).
+[MCP & service dependencies](mcp-and-dependencies.md); `board`, `board_state` and
+`role` in [Workboards](workboards.md).
 
 **Only `tier` is required** — every other field, `agent` included, is
 optional. An explicit `--agent` / `--repo` / `--tier` on the command

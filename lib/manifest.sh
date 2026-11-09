@@ -88,6 +88,16 @@ EOF
 )"
   fi
 
+  # Optional shared workboard (sandbox run --board; lib/board.sh): the board
+  # definition read-only at /workboard, its shared state read-write at
+  # /workboard-state, and WB_* identity env for the in-pod `wb` CLI. Each
+  # fragment is empty unless board_configure accepted a --board this session.
+  if declare -F board_volumes_block >/dev/null && [[ -n "${SESSION_BOARD_DIR:-}" ]]; then
+    volumes_block+=$'\n'"$(board_volumes_block)"
+    mounts_block+=$'\n'"$(board_mounts_block)"
+    env_block+=$'\n'"$(board_env_block "${agent}" "${session_id}")"
+  fi
+
   # envFrom: bundle infra-token (Tier 3 with --infra-token) and the
   # profile-declared session-secrets Secret (set via SESSION_HAS_SECRETS
   # by bin/sandbox after profile resolution). Either or both may be

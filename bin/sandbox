@@ -70,6 +70,8 @@ source "${SANDBOX_ROOT}/lib/config.sh"
 source "${SANDBOX_ROOT}/lib/profile.sh"
 # shellcheck source=../lib/vetting.sh
 source "${SANDBOX_ROOT}/lib/vetting.sh"
+# shellcheck source=../lib/board.sh
+source "${SANDBOX_ROOT}/lib/board.sh"
 
 source "${SANDBOX_ROOT}/lib/catalogue.sh"
 
@@ -243,6 +245,18 @@ OPTIONS:
                                     (auth tokens, session state); default
                                     ~/.sandbox/agent-home/<agent>. Linux/WSL only
   --name <NAME>                     Human-readable session name
+  --board <DIR>                     Mount an agent-workboards checkout READ-ONLY
+                                    at /workboard (rules, personas, the 'wb'
+                                    CLI) so this session can coordinate with
+                                    other sessions through a shared task board.
+                                    Tier 1/2 only. See docs/how-to/workboards.md
+  --board-state <DIR>               Shared, read-write board state mounted at
+                                    /workboard-state (default ~/.sandbox/board;
+                                    on macOS a VM-local dir of that basename).
+                                    Every session given the same dir shares it
+  --role <ROLE[,ROLE...]>           Persona(s) this session takes on the board
+                                    (e.g. developer,tester); sets WB_ROLE.
+                                    Default: the agent's roles in the board config
   --keep-alive                      Leave the pod running after disconnect
                                     (default: tear down on exit to free cluster
                                     resources; conversation history persists in
@@ -436,6 +450,13 @@ print_session_banner() {
     done
   fi
 
+  if [[ -n "${SESSION_BOARD_DIR:-}" ]]; then
+    printf "  %-9s  %s\n" "Board" "${SANDBOX_BOARD_MOUNT} (ro) ←  ${SESSION_BOARD_DIR/#${HOME}/\~}"
+    printf "             %s (rw, shared) ←  %s\n" "${SANDBOX_BOARD_STATE_MOUNT}" \
+      "${SESSION_BOARD_STATE_NODE/#${HOME}/\~}"
+    printf "  %-9s  %s\n" "Role" "${SESSION_BOARD_ROLE:-(agent default from board config)}"
+  fi
+
   printf "  %-9s  %s\n" "Egress"  "${agent} + tier${tier} (${domain_count} domains)"
   printf "  %-9s  %s\n" "Runtime" "gvisor"
   printf "  %-9s  %s\n" "Log"     "${log_display}"
@@ -571,6 +592,7 @@ cmd_run() {
   local opt_homedir=""
   local -a opt_allow_domains=()
   local -a opt_infra_endpoints=()
+  local opt_board="" opt_board_state="" opt_role=""
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
@@ -603,6 +625,12 @@ cmd_run() {
       --name)                  opt_name="${2:?--name requires a value}"; shift ;;
       --name=*)                opt_name="${1#--name=}" ;;
       --keep-alive)            opt_keep_alive="true" ;;
+      --board)                 opt_board="${2:?--board requires a value}"; shift ;;
+      --board=*)               opt_board="${1#--board=}" ;;
+      --board-state)           opt_board_state="${2:?--board-state requires a value}"; shift ;;
+      --board-state=*)         opt_board_state="${1#--board-state=}" ;;
+      --role)                  opt_role="${2:?--role requires a value}"; shift ;;
+      --role=*)                opt_role="${1#--role=}" ;;
       --i-accept-unmasked-secrets) opt_accept_unmasked_secrets="true" ;;
       --i-accept-unvetted-repo) opt_accept_unvetted_repo="true" ;;
       --i-accept-vetting-drift) opt_accept_vetting_drift="true" ;;
@@ -721,6 +749,19 @@ cmd_run() {
         echo "    default_repo: ${_profile_default_repo}"
       fi
 
+      # Optional workboard keys (board / board_state / role), used when the
+      # matching flag is absent. Validated by board_configure like the flags.
+      local _profile_board _profile_board_state _profile_role
+      _profile_board="$(extract_yaml_scalar_from_file "${_profile_path}" board)"
+      _profile_board_state="$(extract_yaml_scalar_from_file "${_profile_path}" board_state)"
+      _profile_role="$(extract_yaml_scalar_from_file "${_profile_path}" role)"
+      if [[ -z "${opt_board}" && -n "${_profile_board}" ]]; then
+        opt_board="${_profile_board}"
+        echo "    board: ${_profile_board}"
+      fi
+      [[ -z "${opt_board_state}" && -n "${_profile_board_state}" ]] && opt_board_state="${_profile_board_state}"
+      [[ -z "${opt_role}" && -n "${_profile_role}" ]] && opt_role="${_profile_role}"
+
       local _profile_extra
       while IFS= read -r _profile_extra; do
         [[ -z "${_profile_extra}" ]] && continue
@@ -819,6 +860,12 @@ cmd_run() {
       die "duplicate --repo basename '${_dup}' — rename one repo or symlink it before passing both."
     fi
   fi
+
+  # Optional shared workboard (lib/board.sh): validates paths, refuses Tier 3
+  # and any overlap with a --repo or sensitive host path, and sets
+  # SESSION_BOARD_* for the manifest builder. No-op without --board.
+  board_configure "${opt_tier}" "${opt_board}" "${opt_board_state}" "${opt_role}" \
+    "${opt_repos[@]+"${opt_repos[@]}"}"
 
   # Resolve --infra-token entries into ENVNAME=PATH pairs. A bare PATH (no '=')
   # injects as INFRA_TOKEN (back-compat); NAME=PATH injects as INFRA_TOKEN_<NAME>,
@@ -1318,6 +1365,10 @@ cmd_run() {
   # Linux/WSL and for tier 1. See prepare_workspace / resolve_workspace_mount.
   prepare_workspace "${session_id}" "${opt_repos[@]+"${opt_repos[@]}"}"
 
+  # Shared board state dir (no-op without --board). Created before the pod that
+  # hostPath-mounts it, like the workspace and agent-home above.
+  board_prepare_state
+
   local current_user="${USER:-$(id -un)}"
   local start_time
   start_time="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -1407,6 +1458,12 @@ cmd_run() {
     audit_log_event "${log_dir}" "secret-scan" "${SESSION_SECRET_SUMMARY}"
   fi
   audit_flush_overrides "${log_dir}"
+  # Record the workboard mounts: the shared state dir is a cross-session data
+  # channel, so session.json and the session log both name it.
+  if [[ -n "${SESSION_BOARD_DIR}" ]]; then
+    board_record_session "${log_dir}"
+    audit_log_event "${log_dir}" "workboard" "$(board_audit_summary)"
+  fi
 
   ###########################################################################
   # Step 5: Capture workspace baseline (Tier 2/3)
@@ -1687,6 +1744,19 @@ cmd_run() {
     local -a _mcp_args=()
     read_into_array _mcp_args < <(get_agent_mcp_launch_args "${opt_agent}")
     [[ "${#_mcp_args[@]}" -gt 0 ]] && agent_cmd+=("${_mcp_args[@]}")
+  fi
+
+  # Workboard: open the session with the operator-authored boot message so the
+  # agent loads its rules + persona from the board. Must stay last (positional).
+  if [[ -n "${SESSION_BOARD_DIR}" ]]; then
+    local -a _boot_args=()
+    read_into_array _boot_args < <(get_agent_initial_prompt_args "${opt_agent}" "$(board_boot_prompt)")
+    if [[ "${#_boot_args[@]}" -gt 0 ]]; then
+      agent_cmd+=("${_boot_args[@]}")
+    else
+      echo "==> Workboard: ${opt_agent} can't take a first message on launch; tell it:"
+      echo "    $(board_boot_prompt)"
+    fi
   fi
 
   # Teardown-on-signal covers the attach so a killed CLI still revokes credentials
@@ -2251,6 +2321,8 @@ _resume_recreate_blocker() {
   [[ "${tier}" -eq 3 ]] && { echo "tier 3 infra credentials are never persisted"; return; }
   [[ -n "${profile}" ]] && { echo "it used profile '${profile}' (dependencies/secrets re-resolve at launch)"; return; }
   [[ "${agent}" == "opencode" ]] && { echo "opencode reads its key + model list from your environment at launch"; return; }
+  [[ -n "$(jq -r '.board // ""' "${sj}" 2>/dev/null)" ]] \
+    && { echo "it mounted a shared workboard (board paths are re-validated at launch)"; return; }
   echo ""
 }
 
@@ -2292,6 +2364,13 @@ _resume_guide_command() {
     [[ -n "${r}" ]] && cmd+=" --repo ${r}"
   done < <(jq -r '.repos[]? // empty' "${sj}")
   [[ -n "${name}" ]] && cmd+=" --name '${name}'"
+  local board board_state board_role
+  board="$(jq -r '.board // ""' "${sj}")"
+  board_state="$(jq -r '.board_state // ""' "${sj}")"
+  board_role="$(jq -r '.board_role // ""' "${sj}")"
+  [[ -n "${board}" ]] && cmd+=" --board ${board}"
+  [[ -n "${board_state}" ]] && cmd+=" --board-state ${board_state}"
+  [[ -n "${board_role}" ]] && cmd+=" --role ${board_role}"
   local d
   while IFS= read -r d; do
     [[ -n "${d}" ]] && cmd+=" --allow-domain ${d}"

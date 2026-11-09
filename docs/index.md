@@ -21,6 +21,7 @@ the operator.
 - [Vet repos for agent use](how-to/vetting.md)
 - [Accept secret-gate false positives](how-to/secret-exceptions.md)
 - [MCP & service dependencies](how-to/mcp-and-dependencies.md)
+- [Coordinate sessions with a shared workboard](how-to/workboards.md)
 - [Tier 3 infra credentials](how-to/tier3-infra-credentials.md)
 - [Local k3d cluster on podman](how-to/local-k3d-podman.md)
 - [Resume and keep-alive sessions](how-to/resuming-sessions.md)

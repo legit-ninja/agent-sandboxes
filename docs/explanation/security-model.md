@@ -13,6 +13,13 @@ For the design intent and threat model behind these controls, read
   ever enters the pod is one explicitly passed via `--infra-kubeconfig`, which
   is minified to a single context, mounted as a K8s Secret at
   `/home/agent/.kube/config`, and deleted on teardown.
+- **Workboard (opt-in)**: `--board` adds two mounts: the board *definition*
+  read-only at `/workboard`, and a *state* directory read-write at
+  `/workboard-state` that every session given the same `--board-state` shares.
+  That shared state is a deliberate data channel between sessions. It is refused
+  on Tier 3, and it may not overlap a `--repo`, `$HOME` or a credential path. Its
+  contents are untrusted and agent-written. See
+  [Workboards](../how-to/workboards.md#security-notes-read-before-sharing-a-board).
 - **Secret gate**: before every Tier 2/3 launch each `--repo` is scanned
   with [betterleaks](https://github.com/betterleaks/betterleaks). A secret
   found in a file the mask would **not** hide aborts the launch — the agent

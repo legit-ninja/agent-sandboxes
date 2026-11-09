@@ -249,6 +249,27 @@ get_agent_sandbox_flags() {
   esac
 }
 
+# get_agent_initial_prompt_args <agent> <prompt> — print, one per line, the
+# argv that starts an INTERACTIVE session with <prompt> as the first user
+# message, or nothing if the CLI has no such form (the session banner then
+# tells the operator what to type). Used for the operator-authored workboard
+# boot message (lib/board.sh:board_boot_prompt); the prompt is never
+# agent-controlled. Positional args must stay last on the command line.
+#   claude / codex : trailing positional prompt
+#   opencode       : --prompt <text>        (TUI)
+#   copilot        : -i <text>              (--interactive)
+#   grok           : not wired (unverified)
+get_agent_initial_prompt_args() {
+  local agent="$1" prompt="$2"
+  [[ -n "${prompt}" ]] || return 0
+  case "${agent}" in
+    claude|codex) printf '%s\n' "${prompt}" ;;
+    opencode)     printf '%s\n' "--prompt" "${prompt}" ;;
+    copilot)      printf '%s\n' "-i" "${prompt}" ;;
+    *)            return 0 ;;
+  esac
+}
+
 # Where a per-session MCP config is mounted inside the pod. A dedicated dir
 # (NOT the shared agent-home hostPath) so the config is session-scoped: the
 # agent-home mount is reused across every session of an agent, and writing a
