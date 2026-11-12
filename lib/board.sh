@@ -18,6 +18,19 @@
 #                     agent-written and untrusted (see the security notes in
 #                     docs/how-to/workboards.md).
 #
+# Tier 3 sessions hold infra credentials, so they never get a write path into the
+# shared state. Instead ("brokered" mode):
+#
+#   /workboard-state  is mounted READ-ONLY;
+#   /workboard-outbox is a PRIVATE per-session dir (<outbox base>/<session id>)
+#                     where `wb` drops write requests (claim, note, done, ...);
+#   <outbox base>/<session id>.json, written here at launch and NOT mounted,
+#                     names the session's agent, roles, tier and state.
+#
+# `wb broker`, run by the operator on the host, takes the identity from that
+# file (not from the pod's environment), applies each request with the board's
+# restricted policy, redacts secret-looking text and checks code bundles.
+#
 # Nothing here touches the network policy: the board is filesystem-only.
 
 SANDBOX_BOARD_MOUNT="/workboard"
@@ -29,12 +42,17 @@ SANDBOX_BOARD_STATE_DEFAULT="${SANDBOX_BOARD_STATE_DEFAULT:-${HOME}/.sandbox/boa
 # per-session Mutagen copies used for workspaces would give each session its own
 # copy — fatal for a coordination board.
 SANDBOX_VM_BOARD_BASE="${SANDBOX_VM_BOARD_BASE:-/var/lib/sandbox/board}"
+SANDBOX_BOARD_OUTBOX_MOUNT="/workboard-outbox"
+SANDBOX_BOARD_OUTBOX_BASE="${SANDBOX_BOARD_OUTBOX_BASE:-${HOME}/.sandbox/board-outbox}"
+SANDBOX_VM_BOARD_OUTBOX_BASE="${SANDBOX_VM_BOARD_OUTBOX_BASE:-/var/lib/sandbox/board-outbox}"
 
 # Session-scoped values the manifest builder reads (set by board_configure).
 SESSION_BOARD_DIR=""         # host/node path of the definition (read-only mount)
 SESSION_BOARD_STATE=""       # operator-facing state path (as given / defaulted)
 SESSION_BOARD_STATE_NODE=""  # node path the pod mounts (== STATE on Linux)
 SESSION_BOARD_ROLE=""
+SESSION_BOARD_TIER=""
+SESSION_BOARD_BROKERED=""    # "1" on Tier 3: read-only state + private outbox
 
 # _board_realpath <path> — canonical absolute path (path may not exist yet; its
 # nearest existing ancestor is canonicalised and the rest appended).
@@ -100,6 +118,7 @@ board_configure() {
   shift 4
   local -a repos=("$@")
   SESSION_BOARD_DIR="" SESSION_BOARD_STATE="" SESSION_BOARD_STATE_NODE="" SESSION_BOARD_ROLE=""
+  SESSION_BOARD_TIER="" SESSION_BOARD_BROKERED=""
 
   if [[ -z "${board}" ]]; then
     [[ -z "${state}" && -z "${role}" ]] \
@@ -107,12 +126,13 @@ board_configure() {
     return 0
   fi
 
-  # Tier 3 sessions hold infra credentials. A shared board is a data channel to
-  # every other session on it (possibly other vendors' models), so refuse rather
-  # than make credential exfiltration across sessions a one-flag affair.
-  [[ "${tier}" -lt 3 ]] \
-    || die "--board is not supported on Tier 3: a shared board would let a session holding infra credentials pass data to every other session on the board."
-  # Same reasoning for profile-declared secrets (injected as env the agent can read).
+  # Tier 3 sessions hold infra credentials. A writable shared board would be a
+  # data channel to every other session on it (possibly other vendors' models),
+  # so Tier 3 gets the state READ-ONLY and writes only through its private
+  # outbox, which the operator's `wb broker` checks and applies (brokered mode).
+  [[ "${tier}" -lt 3 ]] || SESSION_BOARD_BROKERED=1
+  # Profile-declared secrets (injected as env the agent can read) stay refused:
+  # brokered mode is scoped to Tier 3.
   [[ -z "${SESSION_PROFILE_SECRETS:-}" ]] \
     || die "--board can't be combined with a profile that injects secrets (${SESSION_PROFILE_SECRETS}): the shared board would let this session pass them to every other session on it."
 
@@ -177,13 +197,31 @@ board_configure() {
   SESSION_BOARD_DIR="${board}"
   SESSION_BOARD_STATE="${state}"
   SESSION_BOARD_ROLE="${role}"
+  SESSION_BOARD_TIER="${tier}"
+}
+
+# board_outbox_base — where per-session outboxes live (VM-local on macOS, like the state).
+board_outbox_base() {
+  if is_macos; then echo "${SANDBOX_VM_BOARD_OUTBOX_BASE}"; else echo "${SANDBOX_BOARD_OUTBOX_BASE}"; fi
+}
+
+# _board_identity_json <session_id> <agent> — the broker's trusted view of a session.
+_board_identity_json() {
+  jq -cn --arg s "$1" --arg a "$2" --arg r "${SESSION_BOARD_ROLE}" \
+    --argjson t "${SESSION_BOARD_TIER}" --arg st "${SESSION_BOARD_STATE_NODE}" \
+    --arg c "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{session: $s, agent: $a, roles: $r, tier: $t, state: $st, created: $c}'
 }
 
 # board_prepare_state — create the state dir the pod mounts. Linux/WSL: a host
 # dir owned by the operator (the pod runs as the operator's uid, so it can write
 # it). macOS: a VM-local ext4 dir owned by uid 1000 (the pod uid there).
+#
+# board_prepare_state [session_id agent] — brokered sessions also get their
+# private outbox (mounted) and identity file (NOT mounted) next to it.
 board_prepare_state() {
   [[ -n "${SESSION_BOARD_DIR}" ]] || return 0
+  local session_id="${1:-}" agent="${2:-}"
   if is_macos; then
     limactl shell "${LIMA_VM_NAME}" -- sudo install -d -m 0770 -o 1000 -g 1000 \
       "${SESSION_BOARD_STATE_NODE}" \
@@ -193,12 +231,32 @@ board_prepare_state() {
       || die "could not create board state ${SESSION_BOARD_STATE_NODE}"
     chmod 0770 "${SESSION_BOARD_STATE_NODE}" 2>/dev/null || true
   fi
+  [[ -n "${SESSION_BOARD_BROKERED}" ]] || return 0
+  [[ -n "${session_id}" && -n "${agent}" ]] \
+    || die "board_prepare_state: brokered mode needs the session id and agent"
+  local base ident
+  base="$(board_outbox_base)"
+  ident="$(_board_identity_json "${session_id}" "${agent}")" || die "could not build the board identity"
+  if is_macos; then
+    # UNVERIFIED on a live macOS install: the outbox is VM-local and owned by the
+    # pod uid (1000); run `wb broker` inside the VM as that uid or root.
+    limactl shell "${LIMA_VM_NAME}" -- sudo install -d -m 0755 "${base}" \
+      && limactl shell "${LIMA_VM_NAME}" -- sudo install -d -m 0700 -o 1000 -g 1000 "${base}/${session_id}" \
+      && printf '%s\n' "${ident}" | limactl shell "${LIMA_VM_NAME}" -- sudo tee "${base}/${session_id}.json" >/dev/null \
+      || die "could not create board outbox ${base}/${session_id} in ${LIMA_VM_NAME}"
+  else
+    mkdir -p "${base}/${session_id}" || die "could not create board outbox ${base}/${session_id}"
+    chmod 0700 "${base}" "${base}/${session_id}" 2>/dev/null || true
+    ( umask 077; printf '%s\n' "${ident}" > "${base}/${session_id}.json" ) \
+      || die "could not write board identity ${base}/${session_id}.json"
+  fi
 }
 
 # board_volumes_block / board_mounts_block / board_env_block — manifest
 # fragments (empty when no board). Indentation matches lib/manifest.sh.
 board_volumes_block() {
   [[ -n "${SESSION_BOARD_DIR}" ]] || return 0
+  local session_id="${1:-}"
   cat <<EOF
     - name: workboard
       hostPath:
@@ -207,6 +265,12 @@ board_volumes_block() {
     - name: workboard-state
       hostPath:
         path: "${SESSION_BOARD_STATE_NODE}"
+        type: Directory
+EOF
+  [[ -z "${SESSION_BOARD_BROKERED}" ]] || cat <<EOF
+    - name: workboard-outbox
+      hostPath:
+        path: "$(board_outbox_base)/${session_id}"
         type: Directory
 EOF
 }
@@ -220,12 +284,19 @@ board_mounts_block() {
         - name: workboard-state
           mountPath: ${SANDBOX_BOARD_STATE_MOUNT}
 EOF
+  [[ -z "${SESSION_BOARD_BROKERED}" ]] || cat <<EOF
+          readOnly: true
+        - name: workboard-outbox
+          mountPath: ${SANDBOX_BOARD_OUTBOX_MOUNT}
+EOF
 }
 
 # board_env_block <agent> <session_id> — WB_* identity for the `wb` CLI. The
 # operator sets these at launch; the agent can change its own shell env, which
 # only changes how it labels itself on the board (the board is cooperative
-# coordination, not an authorization boundary — see the how-to).
+# coordination, not an authorization boundary — see the how-to). Brokered
+# (Tier 3) sessions add WB_OUTBOX; there the broker trusts only the host-side
+# identity file, so changing the env changes nothing it applies.
 board_env_block() {
   [[ -n "${SESSION_BOARD_DIR}" ]] || return 0
   local agent="$1" session_id="$2"
@@ -245,6 +316,14 @@ EOF
         - name: WB_ROLE
           value: "${SESSION_BOARD_ROLE}"
 EOF
+  [[ -z "${SESSION_BOARD_BROKERED}" ]] || cat <<EOF
+        - name: WB_OUTBOX
+          value: "${SANDBOX_BOARD_OUTBOX_MOUNT}"
+        - name: WB_ACCESS
+          value: "restricted"
+        - name: WB_TIER
+          value: "${SESSION_BOARD_TIER}"
+EOF
 }
 
 # board_boot_prompt — the operator-authored first message that tells the agent
@@ -258,8 +337,13 @@ board_boot_prompt() {
 # board_audit_summary — one line for the session audit log.
 board_audit_summary() {
   [[ -n "${SESSION_BOARD_DIR}" ]] || return 0
-  printf 'definition=%s (ro) state=%s (rw, shared) role=%s' \
-    "${SESSION_BOARD_DIR}" "${SESSION_BOARD_STATE_NODE}" "${SESSION_BOARD_ROLE:-default}"
+  if [[ -n "${SESSION_BOARD_BROKERED}" ]]; then
+    printf 'definition=%s (ro) state=%s (ro, shared; writes via wb broker) outbox=%s role=%s' \
+      "${SESSION_BOARD_DIR}" "${SESSION_BOARD_STATE_NODE}" "$(board_outbox_base)" "${SESSION_BOARD_ROLE:-default}"
+  else
+    printf 'definition=%s (ro) state=%s (rw, shared) role=%s' \
+      "${SESSION_BOARD_DIR}" "${SESSION_BOARD_STATE_NODE}" "${SESSION_BOARD_ROLE:-default}"
+  fi
 }
 
 # board_record_session <log_dir> — persist the board config in session.json
@@ -270,8 +354,11 @@ board_record_session() {
   local sj="$1/session.json" tmp
   [[ -f "${sj}" ]] || return 0
   tmp="$(mktemp)"
+  local brokered=false
+  [[ -z "${SESSION_BOARD_BROKERED}" ]] || brokered=true
   if jq --arg d "${SESSION_BOARD_DIR}" --arg s "${SESSION_BOARD_STATE}" --arg r "${SESSION_BOARD_ROLE}" \
-      '.board = $d | .board_state = $s | .board_role = $r' "${sj}" > "${tmp}"; then
+      --argjson b "${brokered}" \
+      '.board = $d | .board_state = $s | .board_role = $r | .board_brokered = $b' "${sj}" > "${tmp}"; then
     mv "${tmp}" "${sj}"
   else
     rm -f "${tmp}"

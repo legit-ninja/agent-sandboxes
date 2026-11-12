@@ -16,9 +16,12 @@ For the design intent and threat model behind these controls, read
 - **Workboard (opt-in)**: `--board` adds two mounts: the board *definition*
   read-only at `/workboard`, and a *state* directory read-write at
   `/workboard-state` that every session given the same `--board-state` shares.
-  That shared state is a deliberate data channel between sessions. It is refused
-  on Tier 3, and it may not overlap a `--repo`, `$HOME` or a credential path. Its
-  contents are untrusted and agent-written. See
+  That shared state is a deliberate data channel between sessions. On Tier 3
+  the state is mounted **read-only** and the session writes only through a
+  private outbox that the operator's `wb broker` checks, redacts and applies,
+  under an identity taken from a host-side file rather than the pod's env. It
+  may not overlap a `--repo`, `$HOME` or a credential path. Its contents are
+  untrusted and agent-written. See
   [Workboards](../how-to/workboards.md#security-notes-read-before-sharing-a-board).
 - **Secret gate**: before every Tier 2/3 launch each `--repo` is scanned
   with [betterleaks](https://github.com/betterleaks/betterleaks). A secret

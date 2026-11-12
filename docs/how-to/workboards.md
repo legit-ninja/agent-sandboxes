@@ -34,6 +34,9 @@ The pod also gets `WB_HOME`, `WB_STATE`, `WB_AGENT` (the `--agent`), `WB_SESSION
 (the session id), `WB_ROLE` (`--role`, if given) and `WB_HOST_STATE` (the state's
 host path, used by `wb export`).
 
+On **Tier 3** the state is different; see [Tier 3: read-only state and the
+broker](#tier-3-read-only-state-and-the-broker).
+
 - **`--role`** is a comma list of persona names from the board's `.ai/personas/`,
   plus `gate` (runs the deterministic checks stage). Without it the agent takes the
   default roles for its agent in the board config.
@@ -58,6 +61,59 @@ cp ~/agent-workboards/orchestrator/board.example.toml ~/agent-workboards/orchest
 sessions as git bundles in the board state, so the clones never need to push to
 each other. When a task reaches `approved`, `wb export <id>` prints the
 `git fetch` that brings its branch into your real repo for review and merge.
+
+## Tier 3: read-only state and the broker
+
+A Tier 3 session holds infra credentials, so it never gets write access to the
+shared state. It gets:
+
+| In the pod | From | Mode |
+|---|---|---|
+| `/workboard` | `--board` | read-only |
+| `/workboard-state` | `--board-state` | **read-only** |
+| `/workboard-outbox` | `~/.sandbox/board-outbox/<session>` | read-write, **private** to this session |
+
+and `WB_OUTBOX`, `WB_ACCESS=restricted` and `WB_TIER=3`. At launch the sandbox also
+writes `~/.sandbox/board-outbox/<session>.json`, which records the session's agent,
+`--role` list, tier and state dir. That file is **not** mounted.
+
+Inside the pod `wb` works as usual for the agent, with the board's **restricted
+access**. It sees only tasks it can claim and the ones it holds. Writes go as
+request files into the outbox: `claim`, `heartbeat`, `note`, `done`, `release`,
+`block`. On the host, run the broker next to your sessions:
+
+```bash
+~/agent-workboards/bin/wb broker            # state: board_root / $WB_STATE; outboxes: ~/.sandbox/board-outbox
+```
+
+The broker:
+
+- **Takes the session's identity and roles from the host-side `.json` file**, not
+  from the pod's environment or the request.
+- **Applies only those operations, restricted:** the session claims what its roles
+  may claim, and acts only on its own claims. `done` follows the stage's configured
+  route.
+- **Caps and redacts free text** (notes, verdict summaries, findings, block and
+  release reasons). Text matching secret patterns is redacted before anything reaches
+  the shared state: cloud keys, GitHub/GitLab/Slack/OpenAI-style tokens, bearer
+  tokens, kubeconfig credentials, private keys, JWTs, `token=`/`password=` pairs,
+  IPs, and the board's `[redaction]` domains.
+- **Checks code bundles without running git:** the bundle must carry exactly the
+  task's branch, stay under a size cap, and is refused for stages that don't hand on
+  code.
+- Ignores outboxes whose identity names another state dir, and never follows
+  symlinks in the outbox.
+
+If the broker isn't running, the agent's `wb` times out with a message saying so,
+withdraws its request, and nothing changes.
+
+What remains: a Tier 3 session can still put information into the text and code it
+hands on. Redaction catches well-known secret formats, not deliberate encoding. Use
+Tier 3 board sessions for roles whose output you review anyway, and keep
+infra-credential sessions on their own `--board-state` when you can.
+
+Outboxes and identity files are kept after a session ends. Remove old ones from
+`~/.sandbox/board-outbox/` when you no longer need them.
 
 ## Several roles in one session
 
@@ -89,8 +145,10 @@ The two mounts are split by trust on purpose:
   other vendors' models. The sandbox keeps each session's network and filesystem
   isolation, but the board is a path for data and prompt injection between sessions
   that you opt into. So:
-  - `--board` is **refused on Tier 3** and **with a profile that injects `secrets:`**.
-    A session holding those credentials must not have a write path to other sessions.
+  - On **Tier 3** the state is mounted read-only and writes go through the
+    operator's `wb broker` ([above](#tier-3-read-only-state-and-the-broker)), so a
+    session holding infra credentials has no direct write path to other sessions.
+    `--board` is still **refused with a profile that injects `secrets:`**.
   - What remains, by design: every agent can read **its own login**: the OAuth token
     in its agent-home, or OpenCode's API key in its environment. On a shared board, a
     compromised or prompt-injected agent can pass that to the other sessions, and from
@@ -119,9 +177,11 @@ The two mounts are split by trust on purpose:
   - `events.jsonl` in the state is a convenience log written by agents. It is **not**
     an audit record. The session audit log records which board each session mounted
     (`workboard` event; `board*` keys in `session.json`).
-- **Identity is cooperative.** `WB_AGENT` and `WB_ROLE` are set by the operator, but an
-  agent can change its own shell environment. The board's role and pool checks
-  organize honest agents. They are not an authorization boundary between sessions.
+- **Identity is cooperative** on Tier 1/2. `WB_AGENT` and `WB_ROLE` are set by the
+  operator, but an agent can change its own shell environment. The board's role and
+  pool checks organize honest agents. They are not an authorization boundary between
+  sessions. On Tier 3 the broker takes identity from the host-side file, so there it
+  is enforced.
 
 ## Platform notes
 
@@ -134,6 +194,10 @@ The two mounts are split by trust on purpose:
   `wb` from the Mac side, run it in the VM, for example:
   `limactl shell sandbox-vm -- env WB_STATE=/var/lib/sandbox/board/board python3 ~/agent-workboards/bin/wb status`.
   Or run a planner session and let it manage the board.
+  Tier 3 outboxes are VM-local too (`/var/lib/sandbox/board-outbox/<session>`, owned
+  by the pod uid), so run `wb broker` in the VM as root or uid 1000:
+  `limactl shell sandbox-vm -- sudo env WB_STATE=/var/lib/sandbox/board/board python3 ~/agent-workboards/bin/wb broker --outbox-root /var/lib/sandbox/board-outbox`.
+  (Unverified on a live macOS install.)
 - **Resume:** `sandbox resume` reattaches to a running board session normally. It
   will not *recreate* a torn-down one. It prints the full `sandbox run ... --board ...`
   command instead, so the board paths are re-validated.

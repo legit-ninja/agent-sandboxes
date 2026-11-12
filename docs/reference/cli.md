@@ -29,8 +29,9 @@ sandbox run [OPTIONS]
   --dry-run
   --name <name>                      human-readable label (auto-set if omitted)
   --board <DIR>                      agent-workboards checkout, mounted READ-ONLY
-                                     at /workboard; tier 1/2 only (see
-                                     how-to/workboards.md)
+                                     at /workboard. Tier 3: state read-only,
+                                     writes via a private outbox and the
+                                     host's `wb broker` (see how-to/workboards.md)
   --board-state <DIR>                shared read-write board state at
                                      /workboard-state (default ~/.sandbox/board)
   --role <ROLE[,ROLE...]>            board persona(s) for this session (WB_ROLE)

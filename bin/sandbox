@@ -452,8 +452,16 @@ print_session_banner() {
 
   if [[ -n "${SESSION_BOARD_DIR:-}" ]]; then
     printf "  %-9s  %s\n" "Board" "${SANDBOX_BOARD_MOUNT} (ro) ←  ${SESSION_BOARD_DIR/#${HOME}/\~}"
-    printf "             %s (rw, shared) ←  %s\n" "${SANDBOX_BOARD_STATE_MOUNT}" \
-      "${SESSION_BOARD_STATE_NODE/#${HOME}/\~}"
+    if [[ -n "${SESSION_BOARD_BROKERED:-}" ]]; then
+      printf "             %s (ro, shared) ←  %s\n" "${SANDBOX_BOARD_STATE_MOUNT}" \
+        "${SESSION_BOARD_STATE_NODE/#${HOME}/\~}"
+      printf "             %s (rw, private) ← %s/<session>\n" "${SANDBOX_BOARD_OUTBOX_MOUNT}" \
+        "$(board_outbox_base | sed "s#^${HOME}#~#")"
+      printf "             Tier 3: writes are applied by \`wb broker\` on the host; keep it running.\n"
+    else
+      printf "             %s (rw, shared) ←  %s\n" "${SANDBOX_BOARD_STATE_MOUNT}" \
+        "${SESSION_BOARD_STATE_NODE/#${HOME}/\~}"
+    fi
     printf "  %-9s  %s\n" "Role" "${SESSION_BOARD_ROLE:-(agent default from board config)}"
   fi
 
@@ -1367,7 +1375,7 @@ cmd_run() {
 
   # Shared board state dir (no-op without --board). Created before the pod that
   # hostPath-mounts it, like the workspace and agent-home above.
-  board_prepare_state
+  board_prepare_state "${session_id}" "${opt_agent}"
 
   local current_user="${USER:-$(id -un)}"
   local start_time

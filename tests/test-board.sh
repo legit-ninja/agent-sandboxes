@@ -5,7 +5,7 @@
 #
 # Covers lib/board.sh and its manifest wiring:
 #   1. board_configure validation: no-op without --board; --board-state/--role
-#      need --board; Tier 3 refused; the definition must look like an
+#      need --board; Tier 3 is brokered; the definition must look like an
 #      agent-workboards checkout and carry no masked secret files; neither path
 #      may be /, $HOME, a parent of $HOME, or overlap a sensitive path
 #      (~/.ssh, ~/.sandbox/secrets, ...); board/state/repos must not overlap;
@@ -15,6 +15,9 @@
 #      nothing board-related without --board.
 #   3. The boot prompt reaches each agent's launch argv in its supported form.
 #   4. board_record_session persists the config into session.json.
+#   5. Tier 3 (brokered): state mounted READ-ONLY, a private per-session outbox,
+#      WB_OUTBOX/WB_ACCESS/WB_TIER env, and a host-side identity file that is
+#      not mounted into the pod.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/helpers.sh"
 
@@ -34,6 +37,7 @@ source "${SANDBOX_ROOT}/lib/filesystem.sh"
 source "${SANDBOX_ROOT}/lib/agents.sh"
 source "${SANDBOX_ROOT}/lib/manifest.sh"
 SANDBOX_BOARD_STATE_DEFAULT="${HOME}/.sandbox/board"
+SANDBOX_BOARD_OUTBOX_BASE="${HOME}/.sandbox/board-outbox"
 source "${SANDBOX_ROOT}/lib/board.sh"
 
 eval "detect_platform() { echo linux; }"
@@ -73,7 +77,10 @@ test_configure_validation() {
 
   refuses "--board-state needs --board" "need --board" 2 "" "${STATE}" ""
   refuses "--role needs --board" "need --board" 2 "" "" developer
-  refuses "tier 3 refused" "not supported on Tier 3" 3 "${BOARD}" "" ""
+  board_configure 3 "${BOARD}" "${STATE}" "developer" "${REPO}"
+  eq "tier 3 accepted, brokered" "1" "${SESSION_BOARD_BROKERED}"
+  board_configure 2 "${BOARD}" "${STATE}" "" "${REPO}"
+  eq "tier 2 not brokered" "" "${SESSION_BOARD_BROKERED}"
   refuses "missing dir refused" "not a directory" 2 "${HOME}/nope" "" ""
   mkdir -p "${HOME}/notaboard"
   refuses "non-workboards dir refused" "doesn't look like" 2 "${HOME}/notaboard" "" ""
@@ -177,10 +184,62 @@ test_record_session() {
   eq "session.json board_state" "${STATE}" "$(jq -r .board_state "${ld}/session.json")"
   eq "session.json board_role" "tester" "$(jq -r .board_role "${ld}/session.json")"
   eq "session.json keeps existing keys" "ses-1" "$(jq -r .session_id "${ld}/session.json")"
+  eq "session.json board_brokered (tier 2)" "false" "$(jq -r .board_brokered "${ld}/session.json")"
+}
+
+###############################################################################
+test_brokered() {
+  info "Testing Tier 3 brokered board..."
+  local sid="ses-20260101-000000-beef"
+  board_configure 3 "${BOARD}" "${STATE}" "developer" "${REPO}"
+  board_prepare_state "${sid}" grok
+  local ob="${HOME}/.sandbox/board-outbox"
+  [[ -d "${ob}/${sid}" ]] && pass "outbox dir created" || fail "no outbox dir"
+  eq "identity agent" "grok" "$(jq -r .agent "${ob}/${sid}.json")"
+  eq "identity roles" "developer" "$(jq -r .roles "${ob}/${sid}.json")"
+  eq "identity tier" "3" "$(jq -r .tier "${ob}/${sid}.json")"
+  eq "identity state" "${STATE}" "$(jq -r .state "${ob}/${sid}.json")"
+  eq "identity session" "${sid}" "$(jq -r .session "${ob}/${sid}.json")"
+  eq "identity file private" "600" "$(stat -c %a "${ob}/${sid}.json" 2>/dev/null || stat -f %Lp "${ob}/${sid}.json")"
+
+  local man
+  man="$(build_pod_manifest "${sid}" grok 3 img name user "" pod-x "" "" "" "${REPO}")"
+  printf '%s\n' "${man}" | yq -e '.' >/dev/null || fail "brokered manifest is not valid YAML"
+  pass "brokered manifest is valid YAML"
+  local q='.spec.containers[0].volumeMounts[] | select(.name == "workboard-state")'
+  eq "tier 3 state mount is readOnly" "true" "$(printf '%s\n' "${man}" | yq -r "${q} | .readOnly")"
+  q='.spec.containers[0].volumeMounts[] | select(.name == "workboard-outbox")'
+  eq "outbox mounted at /workboard-outbox" "/workboard-outbox" "$(printf '%s\n' "${man}" | yq -r "${q} | .mountPath")"
+  eq "outbox mount is writable" "null" "$(printf '%s\n' "${man}" | yq -r "${q} | .readOnly")"
+  eq "outbox hostPath is this session's dir" "${ob}/${sid}" \
+    "$(printf '%s\n' "${man}" | yq -r '.spec.volumes[] | select(.name == "workboard-outbox") | .hostPath.path')"
+  case "${man}" in
+    *"${sid}.json"*) fail "identity file reaches the pod manifest" ;;
+    *) pass "identity file not mounted" ;;
+  esac
+  local envq='.spec.containers[0].env[] | select(.name == "%s") | .value'
+  # shellcheck disable=SC2059
+  eq "WB_OUTBOX" "/workboard-outbox" "$(printf '%s\n' "${man}" | yq -r "$(printf "${envq}" WB_OUTBOX)")"
+  # shellcheck disable=SC2059
+  eq "WB_ACCESS" "restricted" "$(printf '%s\n' "${man}" | yq -r "$(printf "${envq}" WB_ACCESS)")"
+  # shellcheck disable=SC2059
+  eq "WB_TIER" "3" "$(printf '%s\n' "${man}" | yq -r "$(printf "${envq}" WB_TIER)")"
+  case "$(board_audit_summary)" in
+    *"(ro, shared; writes via wb broker)"*) pass "audit summary says brokered" ;;
+    *) fail "audit summary: $(board_audit_summary)" ;;
+  esac
+
+  board_configure 2 "${BOARD}" "${STATE}" "developer" "${REPO}"
+  man="$(build_pod_manifest "${sid}" grok 2 img name user "" pod-x "" "" "" "${REPO}")"
+  case "${man}" in
+    *workboard-outbox*|*WB_OUTBOX*) fail "tier 2 manifest has an outbox" ;;
+    *) pass "tier 2: no outbox" ;;
+  esac
 }
 
 test_configure_validation
 test_manifest
+test_brokered
 test_boot_prompt
 test_record_session
 echo "All board tests passed."

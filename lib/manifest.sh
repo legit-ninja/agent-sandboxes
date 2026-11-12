@@ -93,7 +93,7 @@ EOF
   # /workboard-state, and WB_* identity env for the in-pod `wb` CLI. Each
   # fragment is empty unless board_configure accepted a --board this session.
   if declare -F board_volumes_block >/dev/null && [[ -n "${SESSION_BOARD_DIR:-}" ]]; then
-    volumes_block+=$'\n'"$(board_volumes_block)"
+    volumes_block+=$'\n'"$(board_volumes_block "${session_id}")"
     mounts_block+=$'\n'"$(board_mounts_block)"
     env_block+=$'\n'"$(board_env_block "${agent}" "${session_id}")"
   fi
