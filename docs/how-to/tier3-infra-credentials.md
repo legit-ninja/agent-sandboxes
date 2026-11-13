@@ -194,14 +194,23 @@ so carried CA and cert files sit next to `clouds.yaml`). Inside the pod:
 - `$OS_CLIENT_CONFIG_FILE` is `/home/agent/.config/openstack/clouds.yaml`
 - `$OS_CLOUD` is set when exactly one `--os-cloud` is given
 
-The identity `auth_url` host and port are auto-allowlisted through the
-same path as `--infra-endpoint`, including the blocked-destinations
-checks. **Service catalog endpoints** (compute, image, network, and so
-on) are not discovered automatically — pass `--infra-endpoint` for each
-API the agent should reach. The credential is never written to the
-board, session logs, audit output, or `session.json`; the audit record
-may list the cloud name only. Workspace `clouds.yaml` masking is
-unchanged.
+The identity `auth_url` host is auto-allowlisted through the same path
+as `--infra-endpoint`, including the blocked-destinations checks. Only
+the host is used (a URL's scheme and path are stripped — Cilium
+`matchName` cannot accept them). Session FQDN egress is **HTTPS/443
+only**: there is no toCIDR grant for these endpoints (unlike
+`--infra-kubeconfig`, which opens the API server's actual port). If
+the `auth_url` or a catalog endpoint uses another port (Keystone's
+`:5000` and compute's `:8774` are common), a warning is printed at
+launch and that port is not reachable from the sandbox. Put those APIs
+behind an HTTPS/443 frontend, or they will not be reachable.
+
+**Service catalog endpoints** (compute, image, network, and so on) are
+not discovered automatically — pass `--infra-endpoint` for each API
+the agent should reach (a hostname or a URL; only the host is
+allowlisted, on 443). The credential is never written to the board,
+session logs, audit output, or `session.json`; the audit record may
+list the cloud name only. Workspace `clouds.yaml` masking is unchanged.
 
 ```bash
 # clouds.yaml on the host (only the named cloud is copied):
@@ -220,7 +229,7 @@ unchanged.
 sandbox run --agent opencode --tier 3 --repo ~/repos/app \
   --board ~/agent-workboards --name my-agent \
   --os-cloud demo \
-  --infra-endpoint https://compute.example.com:8774
+  --infra-endpoint https://compute.example.com
 
 # Pin the file, or pass more than one cloud (OS_CLOUD is then left unset
 # so the agent can pick):

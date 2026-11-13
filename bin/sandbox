@@ -243,7 +243,11 @@ OPTIONS:
                                     in the pod; useful only if kubectl access
                                     is best-effort, e.g. you also pass an
                                     --infra-token for the real auth path)
-  --infra-endpoint <URL>            Extra infra endpoint URL (tier 3, repeatable)
+  --infra-endpoint <HOST|URL>       Extra infra endpoint (tier 3, repeatable).
+                                    A URL is accepted; only the host is
+                                    allowlisted, on HTTPS/443. A non-443
+                                    port is not reachable (a warning is
+                                    printed; the policy is not widened).
   --os-cloud <NAME>                 Named OpenStack cloud from clouds.yaml
                                     (tier 3, repeatable). Only that cloud is
                                     copied into the pod (as clouds.yaml at
@@ -1065,11 +1069,13 @@ cmd_run() {
     SESSION_OS_CLOUD="1"
     SESSION_OS_CLOUD_NAME="$(os_cloud_meta "${_os_tmpdir}" os_cloud)"
     SESSION_OS_CLOUD_NAMES="$(os_cloud_meta "${_os_tmpdir}" clouds | paste -sd, -)"
-    local _os_url
+    local _os_url _os_host _os_port
     while IFS= read -r _os_url; do
       [[ -z "${_os_url}" ]] && continue
+      _os_host="$(url_host "${_os_url}")"
+      _os_port="$(url_port "${_os_url}")"
       opt_infra_endpoints+=("${_os_url}")
-      echo "  Auto-allowlisting auth_url host: ${_os_url}"
+      echo "  Auto-allowlisting: ${_os_host}:${_os_port:-443}"
       _os_auth_hint="true"
     done < <(os_cloud_meta "${_os_tmpdir}" auth_urls)
     if [[ "${_os_auth_hint}" == "true" ]]; then
@@ -1090,6 +1096,28 @@ cmd_run() {
     [[ -z "${_ep_host}" ]] && continue
     check_egress_target_not_blocked "${_ep_host}"
   done
+
+  # Rewrite every --infra-endpoint (and --os-cloud auth_url) to a bare
+  # hostname before any build_cilium_policy call. The policy builder puts
+  # each extra arg into Cilium matchName/matchPattern, which rejects a
+  # scheme or path. Only the host is used; FQDN egress is HTTPS/443 only
+  # (a non-443 port warns, it does not widen the policy). Invalid hosts
+  # die here, still before any cluster ops.
+  local -a _norm_eps=()
+  local _ep_seen _prev
+  for _ep in "${opt_infra_endpoints[@]+"${opt_infra_endpoints[@]}"}"; do
+    [[ -z "${_ep}" ]] && continue
+    _ep_host="$(normalize_infra_endpoint "${_ep}")"
+    _ep_seen="false"
+    for _prev in "${_norm_eps[@]+"${_norm_eps[@]}"}"; do
+      if [[ "${_prev}" == "${_ep_host}" ]]; then
+        _ep_seen="true"
+        break
+      fi
+    done
+    [[ "${_ep_seen}" == "true" ]] || _norm_eps+=("${_ep_host}")
+  done
+  opt_infra_endpoints=("${_norm_eps[@]+"${_norm_eps[@]}"}")
 
   # Fail fast on a malformed blocked_cidrs entry, before any cluster ops —
   # a bad CIDR would otherwise render into the egressDeny rule and Cilium

@@ -418,16 +418,30 @@ test_cli_board_os_cloud_allowed() {
     && echo "${output}" | grep -qv "${FAKE_PASS_DEMO}" \
     && pass "credential values are not in the CLI output" \
     || fail "a fixture password appeared in CLI output"
+  # Auto-allowlisting + the non-443 warn run before ensure_cluster_ready
+  # (the fixture auth_url is on :5000). The printed line is host:port,
+  # never the raw URL (scheme/path would break Cilium matchName).
+  echo "${output}" | grep -q "Auto-allowlisting: identity.example.com:5000" \
+    && pass "os-cloud auto-allowlists the auth_url host:port, not the raw URL" \
+    || fail "missing Auto-allowlisting host:port: ${output}"
+  echo "${output}" | grep -q "https://identity.example.com" \
+    && fail "raw auth_url leaked into CLI allowlist output: ${output}" \
+    || pass "raw auth_url (scheme/path) is not in the allowlist output"
+  echo "${output}" | grep -qi "HTTPS/443 only" \
+    && echo "${output}" | grep -q "5000" \
+    && pass "non-443 auth_url port prints a WARN (policy is not widened)" \
+    || fail "expected a 443-only WARN for auth_url port 5000: ${output}"
   # Without a live cluster, launch stops at ensure_cluster_ready (or an
   # earlier image-presence probe). That is the expected cluster-free end.
   if [[ "${rc}" -eq 0 ]]; then
     # A live cluster would make --dry-run succeed; then assert the hint
-    # and the mount. Still check secrets did not leak (above).
-    echo "${output}" | grep -q "Auto-allowlisting auth_url" \
-      && echo "${output}" | grep -q "Service catalog endpoints" \
+    # and the mount, and that the policy has a bare matchName only.
+    echo "${output}" | grep -q "Service catalog endpoints" \
       && echo "${output}" | grep -q "OS_CLIENT_CONFIG_FILE" \
-      && pass "--board + --os-cloud dry-run succeeded (cluster present); hint and mount rendered" \
-      || fail "dry-run succeeded but missing hint or mount: ${output}"
+      && echo "${output}" | grep -q 'matchName: "identity.example.com"' \
+      && ! echo "${output}" | grep -q 'matchName: "https://' \
+      && pass "--board + --os-cloud dry-run succeeded; hint, mount, and bare matchName rendered" \
+      || fail "dry-run succeeded but missing hint, mount, or bare matchName: ${output}"
   else
     if echo "${output}" | grep -qi "Cannot reach Kubernetes\|Namespace .* not found\|gVisor RuntimeClass\|not present in the cluster\|No runnable image"; then
       pass "--board + --os-cloud reached cluster/image preflight (not a board refusal)"
@@ -444,8 +458,124 @@ test_cli_help() {
   echo "${h}" | grep -q -- "--os-cloud <NAME>" \
     && echo "${h}" | grep -q -- "--os-clouds-file" \
     && echo "${h}" | grep -q "or --os-cloud" \
-    && pass "run --help documents --os-cloud and the Tier 3 requirement" \
-    || fail "--help missing --os-cloud: ${h}"
+    && echo "${h}" | grep -q -- "--infra-endpoint <HOST|URL>" \
+    && echo "${h}" | grep -q "HTTPS/443" \
+    && pass "run --help documents --os-cloud and host-only 443 --infra-endpoint" \
+    || fail "--help missing --os-cloud or --infra-endpoint host/443 wording: ${h}"
+}
+
+###############################################################################
+# Hostname normalization + rendered policy (the Cilium matchName bug:
+# a raw URL with a scheme or path is rejected by the API server).
+###############################################################################
+assert_policy_bare_host() {
+  local pol="$1"
+  local host="$2"
+  local label="$3"
+  printf '%s\n' "${pol}" | grep -q "matchName: \"${host}\"" \
+    && pass "${label}: policy matchName is ${host}" \
+    || fail "${label}: policy missing matchName ${host}:\n${pol}"
+  if printf '%s\n' "${pol}" | grep -E 'matchName: "https?://|matchPattern: "https?://|matchName: ".*/|matchName: ".*:[0-9]'; then
+    fail "${label}: policy matchName/matchPattern still has a scheme, path, or port:\n${pol}"
+  else
+    pass "${label}: policy has no scheme, path, or port in matchName"
+  fi
+}
+
+test_normalize_and_policy() {
+  info "Testing endpoint normalization and the rendered policy..."
+
+  # --os-cloud auth_url with a /v3 path (implied 443): host only, no warn.
+  local host err
+  err="$(mktemp)"
+  host="$(normalize_infra_endpoint "https://identity.example.com/v3" 2>"${err}")"
+  [[ "${host}" == "identity.example.com" ]] \
+    && pass "auth_url https://identity.example.com/v3 normalizes to identity.example.com" \
+    || fail "auth_url /v3 normalized to '${host}'"
+  if grep -qi "443 only" "${err}"; then
+    fail "implied-443 auth_url should not warn: $(cat "${err}")"
+  else
+    pass "implied-443 auth_url does not warn"
+  fi
+  local pol
+  pol="$(build_cilium_policy ses-os claude 3 "" "" "${host}")"
+  assert_policy_bare_host "${pol}" "identity.example.com" "os-cloud auth_url /v3"
+
+  # URL-form --infra-endpoint with a non-443 port: host only, WARN, policy
+  # still only grants 443 (not widened to 8774).
+  host="$(normalize_infra_endpoint "https://compute.example.com:8774" 2>"${err}")" || true
+  [[ "${host}" == "compute.example.com" ]] \
+    && pass "--infra-endpoint URL with :8774 normalizes to compute.example.com" \
+    || fail "8774 URL normalized to '${host}'"
+  grep -qi "HTTPS/443 only" "${err}" && grep -q "8774" "${err}" \
+    && pass "non-443 --infra-endpoint prints a WARN naming port 8774" \
+    || fail "expected 443-only WARN for :8774: $(cat "${err}")"
+  pol="$(build_cilium_policy ses-ep claude 3 "" "" "${host}")"
+  assert_policy_bare_host "${pol}" "compute.example.com" "--infra-endpoint URL with port"
+  if printf '%s\n' "${pol}" | grep -q '8774'; then
+    fail "policy was widened to mention 8774:\n${pol}"
+  else
+    pass "policy is not widened to port 8774"
+  fi
+
+  # Bare host and wildcard kept as-is; host:port strips the port.
+  [[ "$(normalize_infra_endpoint "identity.example.com" 2>/dev/null)" == "identity.example.com" ]] \
+    && pass "bare host is kept as-is" \
+    || fail "bare host was rewritten"
+  [[ "$(normalize_infra_endpoint "*.internal.example.com" 2>/dev/null)" == "*.internal.example.com" ]] \
+    && pass "*.wildcard is kept as-is" \
+    || fail "wildcard was rewritten"
+  [[ "$(normalize_infra_endpoint "identity.example.com:5000" 2>/dev/null)" == "identity.example.com" ]] \
+    && pass "host:port form reduces to the host" \
+    || fail "host:port was not reduced"
+
+  # Dedup: two URLs for the same host collapse when the caller unique-s the
+  # normalize results the same way bin/sandbox does.
+  local a b
+  a="$(normalize_infra_endpoint "https://identity.example.com/v3" 2>/dev/null)"
+  b="$(normalize_infra_endpoint "https://identity.example.com:443/identity" 2>/dev/null)"
+  [[ "${a}" == "${b}" && "${a}" == "identity.example.com" ]] \
+    && pass "two URLs for the same host normalize identically (dedupable)" \
+    || fail "same-host URLs diverged: '${a}' vs '${b}'"
+
+  # Invalid host dies with a readable message, no cluster involved.
+  local rc=0
+  err_out="$(normalize_infra_endpoint "https://foo@bar.example.com/v3" 2>&1)" || rc=$?
+  if [[ "${rc}" -eq 0 ]]; then
+    fail "invalid host should have been refused"
+  fi
+  echo "${err_out}" | grep -qi "not a valid FQDN" \
+    && echo "${err_out}" | grep -q "foo@bar.example.com" \
+    && pass "invalid host dies with a readable message" \
+    || fail "unclear invalid-host error: ${err_out}"
+  rm -f "${err}"
+}
+
+test_cli_infra_endpoint_url_warns() {
+  info "Testing CLI --infra-endpoint URL with a non-443 port warns..."
+  local repo="${TEST_DIR}/repo-ep"
+  init_git_repo "${repo}"
+  printf 'fixture-token\n' > "${TEST_DIR}/infra-token"
+  chmod 0600 "${TEST_DIR}/infra-token"
+  local output rc=0
+  output="$("${SANDBOX_ROOT}/bin/sandbox" run \
+    --agent claude --tier 3 --repo "${repo}" \
+    --infra-token "${TEST_DIR}/infra-token" \
+    --infra-endpoint "https://compute.example.com:8774" \
+    --dry-run 2>&1)" || rc=$?
+  echo "${output}" | grep -qi "HTTPS/443 only" \
+    && echo "${output}" | grep -q "8774" \
+    && pass "CLI warns that --infra-endpoint port 8774 is not reachable" \
+    || fail "expected 443-only WARN for --infra-endpoint :8774: ${output}"
+  if echo "${output}" | grep -q 'matchName: "https://compute.example.com'; then
+    fail "dry-run policy still has a URL in matchName: ${output}"
+  fi
+  if [[ "${rc}" -eq 0 ]]; then
+    echo "${output}" | grep -q 'matchName: "compute.example.com"' \
+      && ! echo "${output}" | grep -q 'matchName: "https://' \
+      && pass "dry-run policy matchName is the bare host (cluster present)" \
+      || fail "dry-run succeeded but policy matchName is wrong: ${output}"
+  fi
 }
 
 ###############################################################################
@@ -461,5 +591,7 @@ test_cli_non_tier3
 test_cli_missing_cloud
 test_cli_blocked_auth_url
 test_cli_board_os_cloud_allowed
+test_normalize_and_policy
+test_cli_infra_endpoint_url_warns
 test_cli_help
 echo "All test-os-cloud tests passed."

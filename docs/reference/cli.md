@@ -25,7 +25,8 @@ sandbox run [OPTIONS]
   --allow-exec-plugin                skip the exec-plugin confirmation prompt
                                      (only useful for scripted runs; plugin
                                      will still fail at auth time)
-  --infra-endpoint <URL>             tier 3, repeatable
+  --infra-endpoint <HOST|URL>        tier 3, repeatable; a URL is accepted,
+                                     only the host is used, HTTPS/443 only
   --os-cloud <NAME>                  tier 3, repeatable; named cloud from
                                      clouds.yaml, mounted at
                                      ~/.config/openstack/; OS_CLOUD is set

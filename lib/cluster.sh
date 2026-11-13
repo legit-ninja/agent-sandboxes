@@ -365,6 +365,41 @@ url_port() {
   fi
 }
 
+# Cilium matchName (toFQDNs / L7 DNS) accepts this pattern only. matchPattern
+# is used for leading-wildcard entries (*.example.com); the suffix after '*.'
+# is checked against the same character class.
+_CILIUM_MATCHNAME_RE='^([-a-zA-Z0-9_]+[.]?)+$'
+
+# normalize_infra_endpoint — print the bare host for a --infra-endpoint value
+# (or an --os-cloud auth_url folded onto that path). A URL or host:port is
+# reduced to its host (url_host); a bare host or *.wildcard is kept as-is.
+# Session FQDN egress is HTTPS/443 only — if the value names a different port
+# (explicit or scheme-default, e.g. Keystone :5000 or http :80), a warning is
+# printed and the host is still emitted (allowlisted on 443); the policy is
+# not widened. Dies if the host is empty or illegal for Cilium matchName /
+# matchPattern, so a bad value fails before any cluster apply.
+normalize_infra_endpoint() {
+  local raw="$1"
+  local host port rest
+  host="$(url_host "${raw}")"
+  port="$(url_port "${raw}")"
+  if [[ -z "${host}" ]]; then
+    die "--infra-endpoint '${raw}' has no usable host. Pass a hostname or a URL; only the host is used."
+  fi
+  if [[ -n "${port}" && "${port}" != "443" ]]; then
+    warn "session egress to FQDNs is HTTPS/443 only, so --infra-endpoint port ${port} will not be reachable. The host '${host}' is still allowlisted on 443."
+  fi
+  if [[ "${host}" == \*.* ]]; then
+    rest="${host#\*.}"
+    if [[ -z "${rest}" ]] || ! [[ "${rest}" =~ ${_CILIUM_MATCHNAME_RE} ]]; then
+      die "--infra-endpoint '${raw}' normalizes to '${host}', which is not a valid FQDN for the network policy. Pass a hostname or a URL; only the host is used."
+    fi
+  elif ! [[ "${host}" =~ ${_CILIUM_MATCHNAME_RE} ]]; then
+    die "--infra-endpoint '${raw}' normalizes to '${host}', which is not a valid FQDN for the network policy. Pass a hostname or a URL; only the host is used."
+  fi
+  printf '%s\n' "${host}"
+}
+
 # kubeconfig_exec_command — print the exec.command for the current user, if any.
 # Empty output means no exec credential plugin is configured.
 kubeconfig_exec_command() {
