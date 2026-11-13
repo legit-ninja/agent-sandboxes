@@ -1340,6 +1340,12 @@ cmd_run() {
     fi
   fi
 
+  # Board identity: WB_NAME is the sanitized --name (slashes become hyphens).
+  # Same --name on a later sandbox run is the intended restart: wb boot reclaims it.
+  if [[ -n "${SESSION_BOARD_DIR}" ]]; then
+    board_set_name "${opt_name}"
+  fi
+
   # Derive a DNS-safe pod name from the human-readable name + 4hex session suffix.
   # Kubernetes names: lowercase alphanumeric and hyphens only, max 253 chars.
   local short_id="${session_id##*-}"
@@ -1754,9 +1760,15 @@ cmd_run() {
     [[ "${#_mcp_args[@]}" -gt 0 ]] && agent_cmd+=("${_mcp_args[@]}")
   fi
 
-  # Workboard: open the session with the operator-authored boot message so the
-  # agent loads its rules + persona from the board. Must stay last (positional).
+  # Workboard: Claude's -n sets the session display name (verified). OpenCode
+  # --title is not wired: unverified on the TUI --prompt path. Then the
+  # operator-authored boot message, which must stay last (positional).
   if [[ -n "${SESSION_BOARD_DIR}" ]]; then
+    if [[ -n "${SESSION_BOARD_NAME}" ]]; then
+      local -a _title_args=()
+      read_into_array _title_args < <(get_agent_session_name_args "${opt_agent}" "${SESSION_BOARD_NAME}")
+      [[ "${#_title_args[@]}" -gt 0 ]] && agent_cmd+=("${_title_args[@]}")
+    fi
     local -a _boot_args=()
     read_into_array _boot_args < <(get_agent_initial_prompt_args "${opt_agent}" "$(board_boot_prompt)")
     if [[ "${#_boot_args[@]}" -gt 0 ]]; then

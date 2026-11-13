@@ -53,6 +53,27 @@ SESSION_BOARD_STATE_NODE=""  # node path the pod mounts (== STATE on Linux)
 SESSION_BOARD_ROLE=""
 SESSION_BOARD_TIER=""
 SESSION_BOARD_BROKERED=""    # "1" on Tier 3: read-only state + private outbox
+SESSION_BOARD_NAME=""        # sanitized --name, exported as WB_NAME
+
+# sanitize_board_name <raw> — same rule as agent-workboards NAME_RE:
+# slashes (and backslashes) become hyphens, other illegal characters are
+# dropped, then 2-32 characters starting with a letter. Empty if it cannot.
+sanitize_board_name() {
+  local s="${1:-}"
+  s="${s//\//-}"
+  s="${s//\\/-}"
+  s="$(printf '%s' "$s" | tr -cd 'A-Za-z0-9_-' | cut -c1-32)"
+  if [[ "${s}" =~ ^[A-Za-z][A-Za-z0-9_-]{1,31}$ ]]; then
+    printf '%s' "$s"
+  fi
+}
+
+# board_set_name <raw> — record the session's board name from sandbox --name.
+# Invalid or empty input clears SESSION_BOARD_NAME (WB_NAME is then omitted).
+board_set_name() {
+  SESSION_BOARD_NAME="$(sanitize_board_name "${1:-}")"
+}
+
 
 # _board_realpath <path> — canonical absolute path (path may not exist yet; its
 # nearest existing ancestor is canonicalised and the rest appended).
@@ -118,7 +139,7 @@ board_configure() {
   shift 4
   local -a repos=("$@")
   SESSION_BOARD_DIR="" SESSION_BOARD_STATE="" SESSION_BOARD_STATE_NODE="" SESSION_BOARD_ROLE=""
-  SESSION_BOARD_TIER="" SESSION_BOARD_BROKERED=""
+  SESSION_BOARD_TIER="" SESSION_BOARD_BROKERED="" SESSION_BOARD_NAME=""
 
   if [[ -z "${board}" ]]; then
     [[ -z "${state}" && -z "${role}" ]] \
@@ -312,6 +333,10 @@ board_env_block() {
         - name: WB_SESSION
           value: "${session_id}"
 EOF
+  [[ -z "${SESSION_BOARD_NAME}" ]] || cat <<EOF
+        - name: WB_NAME
+          value: "${SESSION_BOARD_NAME}"
+EOF
   [[ -z "${SESSION_BOARD_ROLE}" ]] || cat <<EOF
         - name: WB_ROLE
           value: "${SESSION_BOARD_ROLE}"
@@ -330,8 +355,13 @@ EOF
 # to load its profile from the board. Empty when no board.
 board_boot_prompt() {
   [[ -n "${SESSION_BOARD_DIR}" ]] || return 0
-  printf 'You are attached to a shared workboard. Run `%s/bin/wb boot` now and follow what it prints: it loads your rules and persona and shows the work waiting for your role(s).' \
-    "${SANDBOX_BOARD_MOUNT}"
+  if [[ -n "${SESSION_BOARD_NAME}" ]]; then
+    printf '[%s] You are attached to a shared workboard. Run `%s/bin/wb boot` now and follow what it prints: it loads your rules and persona and shows the work waiting for your role(s). Your board name is %s (from --name); do not register a different one. Sub-agents share this name.' \
+      "${SESSION_BOARD_NAME}" "${SANDBOX_BOARD_MOUNT}" "${SESSION_BOARD_NAME}"
+  else
+    printf 'You are attached to a shared workboard. Run `%s/bin/wb boot` now and follow what it prints: it loads your rules and persona and shows the work waiting for your role(s).' \
+      "${SANDBOX_BOARD_MOUNT}"
+  fi
 }
 
 # board_audit_summary — one line for the session audit log.
