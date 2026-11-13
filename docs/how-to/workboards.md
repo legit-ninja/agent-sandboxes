@@ -10,14 +10,26 @@ project. This page covers the sandbox side: mounting it.
 
 ```bash
 sandbox run --agent opencode --tier 2 --repo ~/clones/app-opencode \
-  --board ~/agent-workboards --role developer,tester,gate
+  --board ~/agent-workboards --role developer,tester,gate --name Eng
 sandbox run --agent claude --tier 2 --repo ~/clones/app-claude \
-  --board ~/agent-workboards --role code-reviewer,security
+  --board ~/agent-workboards --role code-reviewer,security --name Rev
 sandbox run --agent codex --tier 2 --repo ~/clones/app-codex \
-  --board ~/agent-workboards --role quality-reviewer
+  --board ~/agent-workboards --role quality-reviewer --name QA
 ```
 
-Each session starts with one message the operator wrote: *run `/workboard/bin/wb boot`*.
+`--name` is the board name. It is sanitized (slashes become hyphens, then 2-32
+characters starting with a letter) and exported into the pod as `WB_NAME`. `wb boot`
+registers or reclaims that name; agents must not pick a different one. **The same
+`--name` is the intended restart:** a later `sandbox run` with the same `--name` and
+the same `--agent` reclaims the name (as long as the previous session has no live
+claims), even though the sandbox session id is new. Sub-agents inherit `WB_NAME`
+and `WB_SESSION` from the lead and share that name.
+
+Each session starts with one message the operator wrote, prefixed with the name
+when `--name` is set (`[Eng] run /workboard/bin/wb boot` …), so the CLI title is
+identifiable. Claude Code is also launched with `-n <name>` (the documented session
+display-name flag). OpenCode `--title` is not passed: it is documented on
+`opencode run` but was not verified for the interactive TUI `--prompt` path.
 That prints the agent's rules (`AGENTS.md`), its persona(s) and the work waiting
 for its roles. From then on the agent claims tasks with `wb claim` and finishes them
 with `wb done`. (The first message is wired for Claude, Codex, OpenCode and Copilot.
@@ -31,7 +43,8 @@ For Grok it isn't wired yet, so the banner prints the line to paste.)
 | `/workboard-state` | `--board-state <DIR>` (default `~/.sandbox/board`) | read-write, **shared** | tasks, verdicts, notes, git bundles, activity log |
 
 The pod also gets `WB_HOME`, `WB_STATE`, `WB_AGENT` (the `--agent`), `WB_SESSION`
-(the session id), `WB_ROLE` (`--role`, if given) and `WB_HOST_STATE` (the state's
+(the session id), `WB_NAME` (the sanitized `--name`, if it is a valid board name),
+`WB_ROLE` (`--role`, if given) and `WB_HOST_STATE` (the state's
 host path, used by `wb export`).
 
 On **Tier 3** the state is different; see [Tier 3: read-only state and the

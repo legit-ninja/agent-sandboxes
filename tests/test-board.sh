@@ -146,6 +146,15 @@ test_manifest() {
   # shellcheck disable=SC2059
   eq "WB_HOME" "/workboard" "$(printf '%s\n' "${man}" | yq -r "$(printf "${envq}" WB_HOME)")"
 
+  eq "no WB_NAME until --name is set" "" "$(printf '%s\n' "${man}" | yq -r "$(printf "${envq}" WB_NAME)")"
+  board_set_name "Eng"
+  man="$(build_pod_manifest ses-20260101-000000-abcd claude 2 img name user "" pod-x "" "" "" "${REPO}")"
+  eq "WB_NAME from --name" "Eng" "$(printf '%s\n' "${man}" | yq -r "$(printf "${envq}" WB_NAME)")"
+  board_set_name "app-opencode/opencode"
+  eq "slashes in --name become hyphens" "app-opencode-opencode" "${SESSION_BOARD_NAME}"
+  board_set_name "1bad"
+  eq "invalid --name is omitted" "" "${SESSION_BOARD_NAME}"
+
   board_configure 2 "" "" ""
   man="$(build_pod_manifest ses-1 claude 2 img name user "" pod-x "" "" "" "${REPO}")"
   case "${man}" in
@@ -169,6 +178,17 @@ test_boot_prompt() {
   eq "copilot: -i flag" "-i" "${a[0]}"
   read_into_array a < <(get_agent_initial_prompt_args grok "${p}")
   eq "grok: not wired (banner tells the operator)" "0" "${#a[@]}"
+  case "${p}" in \[*) fail "unnamed prompt starts with a bracket: ${p}" ;; *) pass "unnamed prompt has no [name] prefix" ;; esac
+  board_set_name "Eng"
+  p="$(board_boot_prompt)"
+  case "${p}" in "[Eng] "*) pass "named prompt starts with [Eng]" ;; *) fail "named prompt: ${p}" ;; esac
+  local -a t=()
+  read_into_array t < <(get_agent_session_name_args claude Eng)
+  eq "claude: -n flag" "-n" "${t[0]}"
+  eq "claude: -n value" "Eng" "${t[1]}"
+  t=()
+  read_into_array t < <(get_agent_session_name_args opencode Eng)
+  eq "opencode: no unverified --title" "0" "${#t[@]}"
   board_configure 2 "" "" ""
   eq "no board, no prompt" "" "$(board_boot_prompt)"
 }

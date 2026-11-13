@@ -270,6 +270,25 @@ get_agent_initial_prompt_args() {
   esac
 }
 
+# get_agent_session_name_args <agent> <name> — CLI flags that set the session's
+# display title to <name>, or nothing if unverified for that agent. Printed one
+# per line so the caller can append them BEFORE the initial prompt (the prompt
+# must stay last for positional CLIs).
+#   claude : -n <name>   (official CLI docs: --name / -n sets the display name
+#                        shown in /resume and the terminal title. Verified
+#                        2026-11-13 against Anthropic's CLI reference.)
+#   opencode : omitted. --title is documented on `opencode run` but was not
+#              verified for the interactive TUI `--prompt` path used here.
+#   others : none known.
+get_agent_session_name_args() {
+  local agent="$1" name="$2"
+  [[ -n "${name}" ]] || return 0
+  case "${agent}" in
+    claude) printf '%s\n' "-n" "${name}" ;;
+    *)      return 0 ;;
+  esac
+}
+
 # Where a per-session MCP config is mounted inside the pod. A dedicated dir
 # (NOT the shared agent-home hostPath) so the config is session-scoped: the
 # agent-home mount is reused across every session of an agent, and writing a
