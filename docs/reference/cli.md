@@ -25,7 +25,16 @@ sandbox run [OPTIONS]
   --allow-exec-plugin                skip the exec-plugin confirmation prompt
                                      (only useful for scripted runs; plugin
                                      will still fail at auth time)
-  --infra-endpoint <URL>             tier 3, repeatable
+  --infra-endpoint <HOST|URL>        tier 3, repeatable; a URL is accepted,
+                                     only the host is used, HTTPS/443 only
+  --os-cloud <NAME>                  tier 3, repeatable; named cloud from
+                                     clouds.yaml, mounted at
+                                     ~/.config/openstack/; OS_CLOUD is set
+                                     when exactly one name is given
+  --os-clouds-file <PATH>            clouds.yaml for --os-cloud (default:
+                                     $OS_CLIENT_CONFIG_FILE, ./clouds.yaml,
+                                     ~/.config/openstack/clouds.yaml, then
+                                     /etc/openstack/clouds.yaml)
   --dry-run
   --name <name>                      human-readable label (auto-set if omitted)
   --board <DIR>                      agent-workboards checkout, mounted READ-ONLY

@@ -80,6 +80,8 @@ source "${SANDBOX_ROOT}/lib/dependency.sh"
 source "${SANDBOX_ROOT}/lib/onboard.sh"
 # shellcheck source=../lib/secrets.sh
 source "${SANDBOX_ROOT}/lib/secrets.sh"
+# shellcheck source=../lib/oscloud.sh
+source "${SANDBOX_ROOT}/lib/oscloud.sh"
 # shellcheck source=../lib/network.sh
 source "${SANDBOX_ROOT}/lib/network.sh"
 # shellcheck source=lib/dns.sh
@@ -185,6 +187,8 @@ EXAMPLES:
       --infra-kubeconfig ~/.kube/dev.yaml --infra-kubeconfig ~/.kube/prod.yaml
   sandbox run --agent opencode --tier 3 --repo ~/repos/infra \\
       --infra-token ~/.infra-token --infra-token vault=~/.vault-token
+  sandbox run --agent opencode --tier 3 --repo ~/repos/infra \\
+      --os-cloud demo --board ~/agent-workboards
   sandbox profile save --tier 2 --agent codex --repo ~/git/public/myapp --name myapp-codex
   sandbox run --profile myapp-codex
   sandbox list
@@ -239,7 +243,22 @@ OPTIONS:
                                     in the pod; useful only if kubectl access
                                     is best-effort, e.g. you also pass an
                                     --infra-token for the real auth path)
-  --infra-endpoint <URL>            Extra infra endpoint URL (tier 3, repeatable)
+  --infra-endpoint <HOST|URL>       Extra infra endpoint (tier 3, repeatable).
+                                    A URL is accepted; only the host is
+                                    allowlisted, on HTTPS/443. A non-443
+                                    port is not reachable (a warning is
+                                    printed; the policy is not widened).
+  --os-cloud <NAME>                 Named OpenStack cloud from clouds.yaml
+                                    (tier 3, repeatable). Only that cloud is
+                                    copied into the pod (as clouds.yaml at
+                                    ~/.config/openstack/); OS_CLOUD is set
+                                    when exactly one name is given. Satisfies
+                                    the Tier 3 credential requirement.
+  --os-clouds-file <PATH>           clouds.yaml for --os-cloud (default:
+                                    \$OS_CLIENT_CONFIG_FILE, ./clouds.yaml,
+                                    ~/.config/openstack/clouds.yaml, then
+                                    /etc/openstack/clouds.yaml). A matching
+                                    secure.yaml next to it is merged.
   --dry-run                         Print manifests without applying
   --homedir <DIR>                   Host directory to back the agent's home
                                     (auth tokens, session state); default
@@ -290,7 +309,7 @@ TIERS:
   1  Ephemeral workspace, agent domains only
   2  Host repo mounted, agent + project domains (github, pypi, npm, terraform)
   3  Tier 2 + infra tooling image + dynamic endpoints
-     Requires at least one of --infra-token or --infra-kubeconfig.
+     Requires at least one of --infra-token, --infra-kubeconfig, or --os-cloud.
 
 PERSISTENT EXTRAS:
   Operator-side sources contribute additional allowed egress domains on every
@@ -600,6 +619,8 @@ cmd_run() {
   local opt_homedir=""
   local -a opt_allow_domains=()
   local -a opt_infra_endpoints=()
+  local -a opt_os_clouds=()
+  local opt_os_clouds_file=""
   local opt_board="" opt_board_state="" opt_role=""
 
   # Parse arguments
@@ -629,6 +650,10 @@ cmd_run() {
       --allow-exec-plugin)     opt_allow_exec_plugin="true" ;;
       --infra-endpoint)        opt_infra_endpoints+=("${2:?--infra-endpoint requires a value}"); shift ;;
       --infra-endpoint=*)      opt_infra_endpoints+=("${1#--infra-endpoint=}") ;;
+      --os-cloud)              opt_os_clouds+=("${2:?--os-cloud requires a value}"); shift ;;
+      --os-cloud=*)            opt_os_clouds+=("${1#--os-cloud=}") ;;
+      --os-clouds-file)        opt_os_clouds_file="${2:?--os-clouds-file requires a value}"; shift ;;
+      --os-clouds-file=*)      opt_os_clouds_file="${1#--os-clouds-file=}" ;;
       --dry-run)               opt_dry_run="true" ;;
       --name)                  opt_name="${2:?--name requires a value}"; shift ;;
       --name=*)                opt_name="${1#--name=}" ;;
@@ -904,9 +929,13 @@ cmd_run() {
     opt_infra_token_pairs+=("${_envname}=${_tpath}")
   done
 
+  if [[ -n "${opt_os_clouds_file}" ]] && [[ "${#opt_os_clouds[@]}" -eq 0 ]]; then
+    die "--os-clouds-file requires --os-cloud <NAME>."
+  fi
   if [[ "${opt_tier}" -eq 3 ]]; then
-    if [[ "${#opt_infra_token_pairs[@]}" -eq 0 ]] && [[ "${#opt_infra_kubeconfigs[@]}" -eq 0 ]]; then
-      die "Tier 3 requires at least one of --infra-token <[NAME=]PATH> or --infra-kubeconfig <PATH>."
+    if [[ "${#opt_infra_token_pairs[@]}" -eq 0 ]] && [[ "${#opt_infra_kubeconfigs[@]}" -eq 0 ]] \
+        && [[ "${#opt_os_clouds[@]}" -eq 0 ]]; then
+      die "Tier 3 requires at least one of --infra-token <[NAME=]PATH>, --infra-kubeconfig <PATH>, or --os-cloud <NAME>."
     fi
     for _tok in "${opt_infra_token_pairs[@]+"${opt_infra_token_pairs[@]}"}"; do
       _tpath="${_tok#*=}"
@@ -919,6 +948,9 @@ cmd_run() {
   else
     if [[ "${#opt_infra_kubeconfigs[@]}" -gt 0 ]]; then
       die "--infra-kubeconfig is only valid for tier 3."
+    fi
+    if [[ "${#opt_os_clouds[@]}" -gt 0 ]]; then
+      die "--os-cloud is only valid for tier 3."
     fi
   fi
   if [[ -n "${opt_infra_kube_context}" ]] && [[ "${#opt_infra_kubeconfigs[@]}" -eq 0 ]]; then
@@ -1017,6 +1049,43 @@ cmd_run() {
     check_egress_target_not_blocked "${domain}"
   done
 
+  # --os-cloud: extract only the named clouds into a 0700 temp dir (plus any
+  # cacert/cert/key files, paths rewritten to the in-pod mount). Each cloud's
+  # auth_url is appended to --infra-endpoint so it gets the same blocked-
+  # destinations check and egress grant. Service catalog endpoints are NOT
+  # discovered; a hint is printed after extraction.
+  local _os_tmpdir="" _os_auth_hint="false"
+  SESSION_OS_CLOUD=""          # "1" when any --os-cloud was given (manifest + audit)
+  SESSION_OS_CLOUD_NAME=""     # set only when exactly one cloud was given
+  SESSION_OS_CLOUD_NAMES=""    # comma-joined names for the audit record (no secrets)
+  if [[ "${#opt_os_clouds[@]}" -gt 0 ]]; then
+    _os_tmpdir="$(mktemp -d -t sandbox-oscloud.XXXXXX)"
+    chmod 0700 "${_os_tmpdir}"
+    # The kubeconfig step may replace this EXIT trap; it also removes _os_tmpdir.
+    # shellcheck disable=SC2064
+    trap "rm -rf '${_os_tmpdir}'" EXIT
+    echo "==> Extracting OpenStack cloud(s): ${opt_os_clouds[*]}..."
+    os_cloud_prepare "${_os_tmpdir}" "${opt_os_clouds_file}" "${opt_os_clouds[@]}"
+    SESSION_OS_CLOUD="1"
+    SESSION_OS_CLOUD_NAME="$(os_cloud_meta "${_os_tmpdir}" os_cloud)"
+    SESSION_OS_CLOUD_NAMES="$(os_cloud_meta "${_os_tmpdir}" clouds | paste -sd, -)"
+    local _os_url _os_host _os_port
+    while IFS= read -r _os_url; do
+      [[ -z "${_os_url}" ]] && continue
+      _os_host="$(url_host "${_os_url}")"
+      _os_port="$(url_port "${_os_url}")"
+      opt_infra_endpoints+=("${_os_url}")
+      echo "  Auto-allowlisting: ${_os_host}:${_os_port:-443}"
+      _os_auth_hint="true"
+    done < <(os_cloud_meta "${_os_tmpdir}" auth_urls)
+    if [[ "${_os_auth_hint}" == "true" ]]; then
+      echo "  Note: only the identity auth_url is auto-allowlisted."
+      echo "  Service catalog endpoints (compute, image, network, and so on)"
+      echo "  still need --infra-endpoint for each API the agent should reach."
+    fi
+  fi
+  export SESSION_OS_CLOUD SESSION_OS_CLOUD_NAME SESSION_OS_CLOUD_NAMES
+
   # --infra-endpoint URLs are handed straight to the policy builder and never
   # enter opt_allow_domains, so validate their hosts here too — otherwise a
   # blocked (or accidentally-production) endpoint bypasses the block list
@@ -1027,6 +1096,28 @@ cmd_run() {
     [[ -z "${_ep_host}" ]] && continue
     check_egress_target_not_blocked "${_ep_host}"
   done
+
+  # Rewrite every --infra-endpoint (and --os-cloud auth_url) to a bare
+  # hostname before any build_cilium_policy call. The policy builder puts
+  # each extra arg into Cilium matchName/matchPattern, which rejects a
+  # scheme or path. Only the host is used; FQDN egress is HTTPS/443 only
+  # (a non-443 port warns, it does not widen the policy). Invalid hosts
+  # die here, still before any cluster ops.
+  local -a _norm_eps=()
+  local _ep_seen _prev
+  for _ep in "${opt_infra_endpoints[@]+"${opt_infra_endpoints[@]}"}"; do
+    [[ -z "${_ep}" ]] && continue
+    _ep_host="$(normalize_infra_endpoint "${_ep}")"
+    _ep_seen="false"
+    for _prev in "${_norm_eps[@]+"${_norm_eps[@]}"}"; do
+      if [[ "${_prev}" == "${_ep_host}" ]]; then
+        _ep_seen="true"
+        break
+      fi
+    done
+    [[ "${_ep_seen}" == "true" ]] || _norm_eps+=("${_ep_host}")
+  done
+  opt_infra_endpoints=("${_norm_eps[@]+"${_norm_eps[@]}"}")
 
   # Fail fast on a malformed blocked_cidrs entry, before any cluster ops —
   # a bad CIDR would otherwise render into the egressDeny rule and Cilium
@@ -1102,7 +1193,7 @@ cmd_run() {
     chmod 0700 "${_kc_tmpdir}"
     kubeconfig_minified="${_kc_tmpdir}/config"
     # shellcheck disable=SC2064
-    trap "rm -rf '${_kc_tmpdir}'" EXIT
+    trap "rm -rf '${_kc_tmpdir}' '${_os_tmpdir}'" EXIT
 
     local -a _kc_parts=()
     local _kc _idx=0 _part _ctx_arg exec_cmd server_url _khost _kport _kip
@@ -1442,6 +1533,7 @@ cmd_run() {
   SESSION_INFRA_KUBECONFIG=""
   [[ "${#opt_infra_kubeconfigs[@]}" -gt 0 ]] && SESSION_INFRA_KUBECONFIG="1"
   export SESSION_INFRA_TOKEN SESSION_INFRA_KUBECONFIG
+  # SESSION_OS_CLOUD* already exported at extraction (names only).
 
   audit_write_session_json \
     "${log_dir}" \
@@ -1615,6 +1707,12 @@ cmd_run() {
     local kc_secret_name="kubeconfig-${session_id}"
     echo "==> Creating kubeconfig secret: ${kc_secret_name}..."
     create_kubeconfig_secret "${kc_secret_name}" "${kubeconfig_minified}"
+  fi
+
+  # Handle Tier 3 OpenStack clouds.yaml secret (--os-cloud)
+  if [[ -n "${SESSION_OS_CLOUD}" ]] && [[ -n "${_os_tmpdir}" ]]; then
+    echo "==> Creating OpenStack cloud secret: os-cloud-${session_id}..."
+    create_os_cloud_secret "${session_id}" "${_os_tmpdir}"
   fi
 
   # Create opencode API key secret before the pod references it
@@ -2086,11 +2184,12 @@ cmd_stop() {
   # record so the revoke reminders below don't depend on live Secret existence
   # (which the pod-delete GC races — PR #93 P1). Absent in pre-P1 session.json →
   # false; the existence-before-delete capture below covers that upgrade window.
-  local had_infra_token="false" had_infra_kubeconfig="false"
+  local had_infra_token="false" had_infra_kubeconfig="false" had_os_cloud="false"
   if [[ -f "${session_json}" ]]; then
     tier="$(jq -r '.tier // "1"' "${session_json}" 2>/dev/null || echo "1")"
     had_infra_token="$(jq -r 'if .infra_token then "true" else "false" end' "${session_json}" 2>/dev/null || echo "false")"
     had_infra_kubeconfig="$(jq -r 'if .infra_kubeconfig then "true" else "false" end' "${session_json}" 2>/dev/null || echo "false")"
+    had_os_cloud="$(jq -r 'if .os_cloud then "true" else "false" end' "${session_json}" 2>/dev/null || echo "false")"
     # Read `.repos` (array, new schema); fall back to `[.repo]` for old
     # session.json files written before the multi-repo refactor.
     read_into_array repos < <(jq -r '
@@ -2159,6 +2258,11 @@ cmd_stop() {
   if kubectl get secret -n "${SANDBOX_NAMESPACE}" "kubeconfig-${session_id}" \
        &>/dev/null 2>&1; then
     kc_secret_present="true"
+  fi
+  local os_cloud_secret_present="false"
+  if kubectl get secret -n "${SANDBOX_NAMESPACE}" "os-cloud-${session_id}" \
+       &>/dev/null 2>&1; then
+    os_cloud_secret_present="true"
   fi
 
   # Delete pod — the containment action (see N7 note above). First, so a
@@ -2232,6 +2336,17 @@ cmd_stop() {
   if [[ "${had_infra_kubeconfig}" == "true" || "${kc_secret_present}" == "true" ]]; then
     warn "REMINDER: kubeconfig credentials used in this session may still be"
     warn "         valid on the target cluster. Rotate or let them expire."
+  fi
+
+  # Delete OpenStack clouds.yaml secret (--os-cloud). Same bookkeeping +
+  # record-OR-existence reminder as the kubeconfig above. The reminder names
+  # the flag only — never the cloud contents.
+  if [[ "${os_cloud_secret_present}" == "true" ]]; then
+    delete_os_cloud_secret "${session_id}"
+  fi
+  if [[ "${had_os_cloud}" == "true" || "${os_cloud_secret_present}" == "true" ]]; then
+    warn "REMINDER: OpenStack credentials used in this session may still be"
+    warn "         valid on the identity service. Rotate or revoke them."
   fi
 
   # Delete opencode API key secret if present
@@ -2314,7 +2429,7 @@ cmd_stop() {
 # resume-of-an-exited-pod helpers (issue #70)
 #
 # When a session ends, cmd_stop deletes the pod, its policy, and ALL secret
-# material (infra token, kubeconfig, opencode key, profile session-secrets) —
+# material (infra token, kubeconfig, OpenStack clouds.yaml, opencode key, profile session-secrets) —
 # PRINCIPLES.md rule 2 keeps secrets from persisting in the cluster. session.json
 # retains only the non-secret config. So resume can rebuild a torn-down session's
 # pod ONLY when its full input survives in session.json and its credentials are

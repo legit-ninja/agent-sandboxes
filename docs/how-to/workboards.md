@@ -78,7 +78,9 @@ each other. When a task reaches `approved`, `wb export <id>` prints the
 ## Tier 3: read-only state and the broker
 
 A Tier 3 session holds infra credentials, so it never gets write access to the
-shared state. It gets:
+shared state. You can pass `--os-cloud` (or `--infra-token` /
+`--infra-kubeconfig`) together with `--board`; those are session infra
+credentials, not profile `secrets:`. It gets:
 
 | In the pod | From | Mode |
 |---|---|---|
@@ -162,6 +164,9 @@ The two mounts are split by trust on purpose:
     operator's `wb broker` ([above](#tier-3-read-only-state-and-the-broker)), so a
     session holding infra credentials has no direct write path to other sessions.
     `--board` is still **refused with a profile that injects `secrets:`**.
+    Tier 3 infra flags (`--infra-token`, `--infra-kubeconfig`, `--os-cloud`)
+    are not profile secrets and **are** allowed with `--board`; see
+    [Tier 3 Infra Credentials](tier3-infra-credentials.md#openstack).
   - What remains, by design: every agent can read **its own login**: the OAuth token
     in its agent-home, or OpenCode's API key in its environment. On a shared board, a
     compromised or prompt-injected agent can pass that to the other sessions, and from

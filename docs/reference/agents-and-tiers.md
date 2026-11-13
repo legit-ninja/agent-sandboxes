@@ -78,7 +78,7 @@ never grant a bare TLD.)
 |------|---------------|--------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------|
 | 1    | emptyDir      | none                                                                                                                                       | none                                                          |
 | 2    | hostPath repo(s) | `github.com`, `api.github.com`, `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org`, `registry.terraform.io`    | `--repo` (repeatable, each must be a git repo)                |
-| 3    | hostPath repo(s) | Tier 2 + URLs from `--infra-endpoint`; API server host/port from `--infra-kubeconfig`                                                      | `--repo` (repeatable) + at least one of `--infra-token` or `--infra-kubeconfig` |
+| 3    | hostPath repo(s) | Tier 2 + hosts from `--infra-endpoint` (HTTPS/443 only); API server host/port from `--infra-kubeconfig`; identity `auth_url` from `--os-cloud`               | `--repo` (repeatable) + at least one of `--infra-token`, `--infra-kubeconfig`, or `--os-cloud` |
 
 Tier 3 also swaps in the `sandbox:<agent>-infra` image variant, which carries
 the infra tooling layer. See `lib/tier.sh` for the authoritative domain list.

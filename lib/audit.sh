@@ -126,6 +126,9 @@ audit_write_session_json() {
   #     so cmd_stop's issuer-side revoke reminders key off the record rather
   #     than off live Secret existence, which the pod-delete GC races (PR #93
   #     P1). Empty (→ false) for Tier 1/2.
+  #   SESSION_OS_CLOUD / SESSION_OS_CLOUD_NAMES — non-empty when --os-cloud
+  #     was given. os_cloud is a boolean (same reminder pattern); os_clouds
+  #     is the list of cloud NAMES only — never credentials or file contents.
   jq -n \
     --arg id "${session_id}" \
     --arg agent "${agent}" \
@@ -146,6 +149,8 @@ audit_write_session_json() {
     --arg kube_host_entity "${SESSION_KUBE_HOST_ENTITY:-}" \
     --arg infra_token "${SESSION_INFRA_TOKEN:-}" \
     --arg infra_kubeconfig "${SESSION_INFRA_KUBECONFIG:-}" \
+    --arg os_cloud "${SESSION_OS_CLOUD:-}" \
+    --arg os_cloud_names "${SESSION_OS_CLOUD_NAMES:-}" \
     '{
       id: $id,
       agent: $agent,
@@ -166,6 +171,8 @@ audit_write_session_json() {
       kube_host_entity: $kube_host_entity,
       infra_token: ($infra_token != ""),
       infra_kubeconfig: ($infra_kubeconfig != ""),
+      os_cloud: ($os_cloud != ""),
+      os_clouds: (if $os_cloud_names == "" then [] else ($os_cloud_names | split(",")) end),
       allowed_domains: $domains,
       retention_days: $retention_days
     }' > "${log_dir}/session.json"

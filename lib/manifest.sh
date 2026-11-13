@@ -290,6 +290,21 @@ EOF
 EOF
   fi
 
+  # --os-cloud: point openstacksdk at the mounted Secret. OS_CLOUD is set
+  # only when exactly one cloud was given (SESSION_OS_CLOUD_NAME).
+  if [[ -n "${SESSION_OS_CLOUD:-}" ]]; then
+    cat <<'EOF'
+        - name: OS_CLIENT_CONFIG_FILE
+          value: "/home/agent/.config/openstack/clouds.yaml"
+EOF
+    if [[ -n "${SESSION_OS_CLOUD_NAME:-}" ]]; then
+      cat <<EOF
+        - name: OS_CLOUD
+          value: "${SESSION_OS_CLOUD_NAME}"
+EOF
+    fi
+  fi
+
   # claude: CLAUDE_CONFIG_DIR moves ~/.claude.json (OAuth/onboarding session
   # state) into the persisted .claude mount. Without it that file lands on the
   # ephemeral root fs and Claude re-runs login every session despite a valid
@@ -591,6 +606,19 @@ EOF
         optional: false
 EOF
   fi
+
+  # --os-cloud: whole Secret as a directory so clouds.yaml and any carried
+  # cacert/cert/key files sit together. Created in cmd_run; deleted by cmd_stop.
+  if [[ -n "${SESSION_OS_CLOUD:-}" ]] && [[ -n "${session_id}" ]]; then
+    cat <<EOF
+    - name: os-cloud
+      secret:
+        secretName: "os-cloud-${session_id}"
+        # 0440 octal — owner+group read; pod fsGroup=1000 grants the agent read.
+        defaultMode: 288
+        optional: false
+EOF
+  fi
 }
 
 # build_volume_mounts_block — emit volumeMounts: list for container
@@ -699,6 +727,16 @@ EOF
         - name: infra-kubeconfig
           mountPath: /home/agent/.kube/config
           subPath: config
+          readOnly: true
+EOF
+  fi
+
+  # Directory mount (not a clouds.yaml subPath) so carried CA/cert files in
+  # the same Secret are visible next to clouds.yaml.
+  if [[ -n "${SESSION_OS_CLOUD:-}" ]]; then
+    cat <<'EOF'
+        - name: os-cloud
+          mountPath: /home/agent/.config/openstack
           readOnly: true
 EOF
   fi
