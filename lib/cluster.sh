@@ -414,6 +414,7 @@ adopt_session_secrets() {
   local -a session_secrets=(
     "infra-token-${session_id}"
     "kubeconfig-${session_id}"
+    "os-cloud-${session_id}"
     "opencode-apikey-${session_id}"
     "$(session_secrets_name "${session_id}")"
   )

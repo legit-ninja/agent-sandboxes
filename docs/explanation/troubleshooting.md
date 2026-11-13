@@ -84,10 +84,17 @@ the full story.
 isn't running. `sudo systemctl status k3s` then `sudo systemctl start
 k3s`; if it won't start, `sudo journalctl -u k3s --no-pager -n 50`.
 
-**`Tier 3 requires at least one of --infra-token or --infra-kubeconfig`.**
+**`Tier 3 requires at least one of --infra-token, --infra-kubeconfig, or --os-cloud`.**
 You asked for `--tier 3` but didn't pass a credential. Either pass
 one of the flags or drop to `--tier 2` if you only need package
-registry access.
+registry access. `--os-cloud` is documented in [Tier 3 Infra
+Credentials](../how-to/tier3-infra-credentials.md#openstack).
+
+**`cloud '…' uses auth_type '…', which needs an interactive, federated, or host-side login`.**
+`--os-cloud` refused an entry that cannot be carried into the pod
+(OIDC, SAML, TOTP, Kerberos, device-code, exec, and similar). Use a
+password, token, or application-credential entry; see [Tier 3 Infra
+Credentials](../how-to/tier3-infra-credentials.md#openstack).
 
 **`kubeconfig uses exec credential plugin '<binary>'`** at launch.
 The detector saw an `exec:` block in your kubeconfig. Answer `n` and

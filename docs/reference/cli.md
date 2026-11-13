@@ -26,6 +26,14 @@ sandbox run [OPTIONS]
                                      (only useful for scripted runs; plugin
                                      will still fail at auth time)
   --infra-endpoint <URL>             tier 3, repeatable
+  --os-cloud <NAME>                  tier 3, repeatable; named cloud from
+                                     clouds.yaml, mounted at
+                                     ~/.config/openstack/; OS_CLOUD is set
+                                     when exactly one name is given
+  --os-clouds-file <PATH>            clouds.yaml for --os-cloud (default:
+                                     $OS_CLIENT_CONFIG_FILE, ./clouds.yaml,
+                                     ~/.config/openstack/clouds.yaml, then
+                                     /etc/openstack/clouds.yaml)
   --dry-run
   --name <name>                      human-readable label (auto-set if omitted)
   --board <DIR>                      agent-workboards checkout, mounted READ-ONLY

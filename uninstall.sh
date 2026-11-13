@@ -496,11 +496,11 @@ if [[ "${kubectl_available}" == "true" ]]; then
     skip "No CiliumNetworkPolicies found."
   fi
 
-  # Delete any lingering infra-token and opencode API key secrets
+  # Delete any lingering session credential secrets (infra-token, kubeconfig, os-cloud, opencode)
   info "Deleting sandbox secrets..."
   if kubectl --kubeconfig "${SANDBOX_KUBECONFIG}" \
        get secrets -n "${SANDBOX_NAMESPACE}" \
-       --no-headers 2>/dev/null | grep -qE '(infra-token|opencode-apikey)'; then
+       --no-headers 2>/dev/null | grep -qE '(infra-token|opencode-apikey|kubeconfig-|os-cloud-)'; then
     try kubectl --kubeconfig "${SANDBOX_KUBECONFIG}" delete secrets \
       -n "${SANDBOX_NAMESPACE}" \
       -l sandbox-session

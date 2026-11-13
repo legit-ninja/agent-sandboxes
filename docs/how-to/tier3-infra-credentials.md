@@ -2,8 +2,8 @@
 
 [← Documentation](../index.md)
 
-Tier 3 sessions need at least one credential slot — the two are orthogonal
-and can be combined:
+Tier 3 sessions need at least one credential slot — `--infra-token`,
+`--infra-kubeconfig`, and `--os-cloud` are orthogonal and can be combined:
 
 - **`--infra-token <[NAME=]PATH>`** — flat file containing a single
   bearer-style token. The contents are stored in a per-session K8s Secret and
@@ -160,3 +160,77 @@ an agent session — see PRINCIPLES.md "Credential isolation".
 Credential lifetime is the operator's responsibility — if the kubeconfig
 expires mid-session, kubectl starts failing and you should re-run
 `sandbox run` with a freshly issued one.
+
+
+## OpenStack
+
+`--os-cloud <NAME>` (repeatable, Tier 3 only) copies **only** the named
+cloud from your host's `clouds.yaml` into the sandbox. Other clouds in
+the same file are not sent to the pod. This satisfies the Tier 3
+credential requirement on its own, and it works with `--board` — it is
+not a profile `secrets:` entry (those stay refused with `--board`).
+
+The host looks up `clouds.yaml` in openstacksdk order:
+`$OS_CLIENT_CONFIG_FILE`, `./clouds.yaml`, `~/.config/openstack/clouds.yaml`,
+then `/etc/openstack/clouds.yaml`. Pass `--os-clouds-file <PATH>` to
+pin a file. If a `secure.yaml` sits next to the chosen file, the matching
+cloud entry is merged in (secure values win).
+
+If the entry's `cacert`, `cert`, or `key` (or a `verify` path) points at
+a file, that file is copied into the same per-session Secret and the
+path is rewritten to the in-pod mount. Auth types that need an
+interactive, federated, or host-side login (OIDC, SAML, TOTP, Kerberos,
+device-code, exec helpers, and similar) are refused, with a message
+pointing here — same idea as the kubeconfig exec-plugin refusal. Use a
+password, token, or application-credential entry instead. Vendor
+`profile:` references that do not themselves carry an `auth_url` are
+also refused.
+
+The extracted file is stored in a Secret (`os-cloud-<session>`) created
+and deleted with the session, matching `--infra-kubeconfig`. It is
+mounted read-only at `/home/agent/.config/openstack/` (the whole Secret,
+so carried CA and cert files sit next to `clouds.yaml`). Inside the pod:
+
+- `$OS_CLIENT_CONFIG_FILE` is `/home/agent/.config/openstack/clouds.yaml`
+- `$OS_CLOUD` is set when exactly one `--os-cloud` is given
+
+The identity `auth_url` host and port are auto-allowlisted through the
+same path as `--infra-endpoint`, including the blocked-destinations
+checks. **Service catalog endpoints** (compute, image, network, and so
+on) are not discovered automatically — pass `--infra-endpoint` for each
+API the agent should reach. The credential is never written to the
+board, session logs, audit output, or `session.json`; the audit record
+may list the cloud name only. Workspace `clouds.yaml` masking is
+unchanged.
+
+```bash
+# clouds.yaml on the host (only the named cloud is copied):
+#
+#   clouds:
+#     demo:
+#       auth:
+#         auth_url: https://identity.example.com:5000/v3
+#         username: demo
+#         password: ...
+#         project_name: demo
+#         user_domain_name: Default
+#         project_domain_name: Default
+#       region_name: RegionOne
+#
+sandbox run --agent opencode --tier 3 --repo ~/repos/app \
+  --board ~/agent-workboards --name my-agent \
+  --os-cloud demo \
+  --infra-endpoint https://compute.example.com:8774
+
+# Pin the file, or pass more than one cloud (OS_CLOUD is then left unset
+# so the agent can pick):
+sandbox run --agent claude --tier 3 --repo ~/repos/app \
+  --os-cloud demo --os-cloud staging \
+  --os-clouds-file ~/.config/openstack/clouds.yaml
+```
+
+Credential lifetime is the operator's responsibility — if the
+application credential or password is revoked mid-session, API calls
+start failing and you should re-run `sandbox run` with a fresh entry.
+A profile field `os_cloud:` is not supported; pass the flag (or a
+wrapper script) the same way you would `--infra-kubeconfig`.
